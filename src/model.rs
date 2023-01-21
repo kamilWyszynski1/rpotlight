@@ -82,4 +82,8 @@ impl fts::TokenProvider for ParseContentWithPath {
     fn get_tokens(&self) -> Vec<String> {
         self.message.tokens.clone()
     }
+
+    fn id(&self) -> String {
+        self.message.parsed_content.clone()
+    }
 }

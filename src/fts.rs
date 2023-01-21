@@ -20,6 +20,7 @@ pub fn tokenize<S: Into<String>>(text: S) -> Vec<String> {
 
 pub trait TokenProvider {
     fn get_tokens(&self) -> Vec<String>;
+    fn id(&self) -> String;
 }
 
 // Content requried for kind-of full-text search functionalities.
@@ -33,12 +34,9 @@ pub struct FTS<T> {
 
 impl<T> FTS<T>
 where
-    T: Clone + Ord + Debug,
+    T: TokenProvider + Clone + Ord + Debug,
 {
-    pub fn push(&mut self, content: T)
-    where
-        T: TokenProvider,
-    {
+    pub fn push(&mut self, content: T) {
         self.content.push(content.clone());
 
         let idx = self.content.len() - 1;
@@ -46,6 +44,26 @@ where
             .get_tokens()
             .into_iter()
             .for_each(|token| self.indexes.entry(token).or_default().push(idx));
+    }
+
+    pub fn delete(&mut self, id: String) -> Option<T> {
+        self.content
+            .iter()
+            .position(|t| t.id() == id)
+            .and_then(|index| {
+                // delete found index from indexes map
+                self.indexes.iter_mut().for_each(|(_, inxs)| {
+                    inxs.retain(|v| *v != index);
+                });
+                // decrease index of every "pointer" that is greater index that we are removing
+                self.indexes.iter_mut().for_each(|(_, inxs)| {
+                    inxs.iter_mut()
+                        .filter(|v| **v > index)
+                        .for_each(|v| *v -= 1);
+                });
+                // delete found index
+                Some(self.content.remove(index))
+            })
     }
 
     /// Takes statement, tokenizes it and retruns all possible content for those tokens.
@@ -57,14 +75,6 @@ where
         let mut scores: HashMap<usize, usize> = HashMap::default();
         // calculate scores for each contents
         tokens.into_iter().for_each(|token| {
-            // TODO: if token matches only by starts_with it should get less points
-
-            // self.indexes.get(&token).and_then(|indexes| {
-            //     indexes.iter().for_each(|i| {
-            //         scores.entry(*i).and_modify(|v| *v += 1).or_default();
-            //     });
-            //     None::<Vec<usize>>
-            // });
             self.indexes.iter().for_each(|(tkn, inxs)| {
                 if tkn.eq(&token) {
                     inxs.into_iter().for_each(|inx| {
@@ -112,19 +122,27 @@ mod tests {
         fn get_tokens(&self) -> Vec<String> {
             tokenize(self.to_string())
         }
+
+        fn id(&self) -> String {
+            self.to_string()
+        }
     }
 
     #[test]
-    fn test_ordering() {
-        let mut a = vec![
-            (0, "He strives to keep the best lawn in the neighborhood."),
-            (
-                0,
-                "I was very proud of my nickname throughout high school but today- I couldn’t be any different to what my nickname was.",
-            ),
-        ];
-        a.sort_by(|a, b| b.cmp(a));
-        println!("{:?}", a)
+    fn test_remove() {
+        let mut fts: FTS<&str> = FTS::default();
+        fts.push("lol what");
+        fts.push("what");
+        fts.push("lol");
+        assert_eq!(fts.content.len(), 3);
+        assert_eq!(fts.indexes.iter().map(|(_, v)| v.len()).sum::<usize>(), 4);
+
+        fts.delete("what".to_string());
+        assert_eq!(fts.content.len(), 2);
+        assert_eq!(fts.indexes.iter().map(|(_, v)| v.len()).sum::<usize>(), 3);
+
+        assert_eq!(fts.search("what").unwrap(), vec!["lol what"]);
+        assert_eq!(fts.search("lol").unwrap(), vec!["lol", "lol what"]);
     }
 
     #[test]

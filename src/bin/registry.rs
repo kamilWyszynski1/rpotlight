@@ -1,298 +1,13 @@
-use anyhow::{bail, Context};
-use prost::Message;
+use rpot::cli;
 use rpot::communication;
-use rpot::communication::ParseResponse;
-use rpot::fts;
-use rpot::model::{self, ParseContentWithPath};
-use rpot::read;
+use rpot::registry;
 use rpot::twoway;
 use std::path::Path;
-use std::{collections::HashMap, path, sync::Arc};
+use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
-use tonic::{transport::Server, Response, Status};
-use tracing::warn;
-use tracing::{error, info};
+use tonic::transport::Server;
 
-type Parsers = Arc<
-    Mutex<
-        HashMap<
-            communication::ParserType,
-            communication::parser_client::ParserClient<tonic::transport::Channel>,
-        >,
-    >,
->;
-
-pub struct Registry {
-    /// Receives file paths that will be sent to parsers.
-    tx: Option<mpsc::Receiver<String>>,
-
-    /// Receives cli command.
-    cli_tx: Option<twoway::Receiver<communication::CliRequest, communication::CliResponse>>,
-
-    /// RPC clients for parsers.
-    parsers: Parsers,
-
-    /// Structure is responsible for all operation related to storing indexes and searches.
-    fts: Arc<Mutex<fts::FTS<ParseContentWithPath>>>,
-
-    /// Database will store information about prased files.
-    db: DB,
-}
-
-#[tonic::async_trait]
-impl communication::register_server::Register for Registry {
-    async fn register(
-        &self,
-        request: tonic::Request<communication::RegisterRequest>,
-    ) -> Result<Response<communication::RegisterResponse>, Status> {
-        let data = request.into_inner();
-
-        info!("trying to connect to parser server, {:?}", data);
-
-        let client = communication::parser_client::ParserClient::connect(format!(
-            "http://[::1]:{}",
-            data.port
-        ))
-        .await
-        .map_err(|e| {
-            error!("error while creating client, {}", e);
-            Status::internal("could not create client")
-        })?;
-
-        self.parsers.lock().await.insert(data.p_type(), client);
-
-        Ok(Response::new(communication::RegisterResponse::default()))
-    }
-}
-
-async fn load_fts_from_db(db: &DB) -> anyhow::Result<fts::FTS<ParseContentWithPath>> {
-    // load database content at start
-    let mut fts = fts::FTS::default();
-    let parsed_tree = db.clone().lock().await.open_tree("parsed")?;
-    for msg in parsed_tree.into_iter() {
-        let msg = msg?;
-        let (_, value) = msg;
-
-        let value = ParseResponse::decode(value.to_vec().as_slice())?;
-
-        let file_path = value.file_path.clone();
-        for parse_content in value.content {
-            fts.push(ParseContentWithPath {
-                message: parse_content.into(),
-                file_path: file_path.clone(),
-            });
-        }
-    }
-    Ok(fts)
-}
-
-impl Registry {
-    async fn new(
-        tx: mpsc::Receiver<String>,
-        cli_tx: twoway::Receiver<communication::CliRequest, communication::CliResponse>,
-        db: DB,
-    ) -> anyhow::Result<Self> {
-        let fts = load_fts_from_db(&db).await?;
-        Ok(Self {
-            tx: Some(tx),
-            parsers: Arc::default(),
-            cli_tx: Some(cli_tx),
-            fts: Arc::new(Mutex::new(fts)),
-            db,
-        })
-    }
-
-    async fn start_receiving(&mut self) -> anyhow::Result<()> {
-        let mut tx = self.tx.take().context("tx is not set")?;
-        let parsers = self.parsers.clone();
-        let fts = self.fts.clone();
-        let mut cli_tx = self.cli_tx.take().context("cli_tx is not set")?;
-        let parsed_tree = self.db.clone().lock().await.open_tree("parsed")?;
-
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    // parsers things
-                    file_path = tx.recv() => {
-                        if file_path.is_none() {
-                            warn!("file_path channel has been closed");
-                            continue
-                        }
-                        let file_path = file_path.unwrap();
-
-                        match parse_file(file_path.clone(), parsers.clone()).await {
-                            Ok(parsed) => {
-                                // convert parsed, proto message into bytes
-                                let mut buf = vec![];
-                                parsed.encode(&mut buf).unwrap();
-                                // write those bytes
-                                parsed_tree.insert(file_path.clone(), buf).unwrap();
-
-                                let file_path = parsed.file_path.clone();
-                                for parse_content in parsed.content {
-                                    fts.lock().await.push(ParseContentWithPath { message: parse_content.into(), file_path: file_path.clone() });
-                                }
-                            },
-                            Err(err) => {
-                                error!("could not parse file: {}", err)
-                            },
-                        }
-                    }
-                    // cli things
-                    cmd = cli_tx.recv() => {
-                        if cmd.is_none() {
-                            warn!("cmd channel has been closed");
-                            continue
-                        }
-
-                        let cmd = cmd.unwrap();
-                        let content = cmd.content;
-
-                        match communication::CliType::from_i32(cmd.c_type).unwrap() {
-                            communication::CliType::Search => {
-                                info!("fts content: {:?}", fts);
-                                let r = fts.lock().await.search(content.clone());
-                                let response: String = match r {
-                                    Some::<Vec<ParseContentWithPath>>(found) => {
-                                        serde_json::json!(found).to_string()
-                                    },
-                                    None => "not matches found".to_string()
-                                };
-                                if let Err(err) = cli_tx.response(communication::CliResponse { response }).await {
-                                    error!(command = "search", content = content, err = err.to_string(),"failed to send response")
-                                }
-                            },
-                        }
-                    }
-                }
-            }
-        });
-        Ok(())
-    }
-}
-
-async fn parse_file(
-    file_path: String,
-    parsers: Parsers,
-) -> anyhow::Result<communication::ParseResponse> {
-    let parser_type = match path::Path::new(&file_path)
-        .extension()
-        .unwrap()
-        .to_str()
-        .unwrap()
-    {
-        "go" => Some(communication::ParserType::Golang),
-        "rs" => Some(communication::ParserType::Rust),
-        _ => None,
-    };
-
-    if parser_type.is_none() {
-        bail!("could not find ParserType enum for {} file", file_path);
-    }
-
-    Ok(parsers
-        .lock()
-        .await
-        .get_mut(&parser_type.unwrap())
-        .context("no registered parser")?
-        .parse(communication::ParseRequest { file_path })
-        .await?
-        .into_inner())
-}
-
-struct CliServer {
-    tx: Arc<Mutex<twoway::Sender<communication::CliRequest, communication::CliResponse>>>,
-}
-
-impl CliServer {
-    fn new(tx: twoway::Sender<communication::CliRequest, communication::CliResponse>) -> Self {
-        Self {
-            tx: Arc::new(Mutex::new(tx)),
-        }
-    }
-}
-
-#[tonic::async_trait]
-impl communication::cli_server::Cli for CliServer {
-    async fn command(
-        &self,
-        request: tonic::Request<communication::CliRequest>,
-    ) -> Result<Response<communication::CliResponse>, Status> {
-        let response = self
-            .tx
-            .lock()
-            .await
-            .send(request.into_inner())
-            .await
-            .map_err(|e| {
-                error!(err = e.to_string(), "error while sending cli request");
-                Status::internal("error while sending cli request")
-            })?
-            .context("response is None")
-            .map_err(|e| {
-                error!(err = e.to_string(), "error occured");
-                Status::internal("something went wrong")
-            })?;
-        Ok(Response::new(response))
-    }
-}
-
-struct FileInfoProvider {
-    db: DB,
-}
-
-impl FileInfoProvider {
-    fn new(db: DB) -> Self {
-        Self { db }
-    }
-
-    async fn read_and_send_files<P: AsRef<Path>>(
-        &self,
-        path: P,
-        tx: &mpsc::Sender<String>,
-    ) -> anyhow::Result<()> {
-        let path = path.as_ref();
-        loop {
-            tokio::time::sleep(std::time::Duration::new(10, 0)).await;
-            let mut files = vec![];
-
-            info!("reading directory");
-
-            read::visit_dirs(
-                path,
-                vec![read::IncludeOnly::Suffix(".rs".to_string())],
-                vec![read::Exclude::Contains("target/debug".to_string())],
-                |entry| files.push(entry.path().to_str().unwrap().to_string()),
-            )?;
-
-            info!("found {} files", files.len());
-
-            // separate tree for send information.
-            let send_tree = self.db.lock().await.open_tree("send")?;
-
-            for file in files {
-                let was_sent = send_tree.get(file.clone())?;
-                if was_sent.is_some() {
-                    info!(file = file.clone(), "file was already sent to process");
-                    continue;
-                }
-                match tx.send(file.clone()).await {
-                    Ok(_) => {
-                        send_tree.insert(file, b"true")?;
-                    }
-                    Err(err) => {
-                        error!(error = err.0, "could not send message");
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Type wrap for database.
-type DB = Arc<Mutex<sled::Db>>;
-
-fn create_or_load_db<P: AsRef<Path>>(p: P) -> anyhow::Result<DB> {
+fn create_or_load_db<P: AsRef<Path>>(p: P) -> anyhow::Result<registry::DB> {
     let tree = sled::open(p)?;
     Ok(Arc::new(Mutex::new(tree)))
 }
@@ -307,16 +22,16 @@ async fn main() -> anyhow::Result<()> {
     let addr = "[::1]:50051".parse()?;
     let cli_addr = "[::1]:50053".parse()?;
 
-    let (tx, rx) = mpsc::channel::<String>(1);
+    let (tx, rx) = mpsc::channel(64);
     let (cli_tx, cli_rx) = twoway::channel(100);
-    let mut registry = Registry::new(rx, cli_rx, db.clone()).await?;
+    let mut registry = registry::Registry::new(rx, cli_rx, db.clone()).await?;
 
-    let file_provider = FileInfoProvider::new(db.clone());
+    let file_provider = registry::FileInfoProvider::new(db.clone());
 
     // spawn task that will read files
     tokio::spawn(async move {
         file_provider
-            .read_and_send_files("/Users/kamilwyszynski/private/rplotlight", &tx)
+            .read_and_send_files("/Users/kamilwyszynski/private/rplotlight", tx)
             .await
             .unwrap();
     });
@@ -324,9 +39,9 @@ async fn main() -> anyhow::Result<()> {
     // spawn task that will receive cli rpc calls
     tokio::spawn(async move {
         Server::builder()
-            .add_service(communication::cli_server::CliServer::new(CliServer::new(
-                cli_tx,
-            )))
+            .add_service(communication::cli_server::CliServer::new(
+                cli::CliServer::new(cli_tx),
+            ))
             .serve(cli_addr)
             .await
             .unwrap();

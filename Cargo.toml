@@ -23,6 +23,7 @@ serde = { version = "1.0.152", features = ["derive"] }
 lazy_static = "1.4.0"
 regex = "1.7.1"
 sled = "0.34.7"
+notify = "5.0.0"
 
 [build-dependencies]
 tonic-build = "0.8"
