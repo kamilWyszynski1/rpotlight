@@ -28,6 +28,31 @@ struct ParseContentWithPath {
     file_path: String,
 }
 
+impl PartialEq for ParseContentWithPath {
+    fn eq(&self, other: &Self) -> bool {
+        self.parse_content.content == other.parse_content.content
+            && self.file_path == other.file_path
+    }
+}
+
+impl Eq for ParseContentWithPath {
+    fn assert_receiver_is_total_eq(&self) {}
+}
+
+impl PartialOrd for ParseContentWithPath {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        self.parse_content
+            .content
+            .partial_cmp(&other.parse_content.content)
+    }
+}
+
+impl Ord for ParseContentWithPath {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.parse_content.content.cmp(&other.parse_content.content)
+    }
+}
+
 impl fts::TokenProvider for ParseContentWithPath {
     fn get_tokens(&self) -> Vec<String> {
         self.parse_content.tokens.clone()
