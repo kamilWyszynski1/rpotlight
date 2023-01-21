@@ -1,6 +1,7 @@
 use clap::Parser;
 use rpot::cli;
 use rpot::communication;
+use rpot::model::ParseContentWithPath;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -10,6 +11,17 @@ async fn main() -> anyhow::Result<()> {
     let response = client
         .command(communication::CliRequest::from(cli.command))
         .await?;
-    println!("{}", response.into_inner().response);
+
+    let a: Vec<ParseContentWithPath> =
+        serde_json::from_str(response.into_inner().response.as_str())?;
+
+    println!("searches:");
+    for content in a {
+        println!(
+            "\t {} in {}:{}",
+            content.message.parsed_content, content.file_path, content.message.file_line
+        )
+    }
+
     Ok(())
 }

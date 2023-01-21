@@ -1,8 +1,13 @@
-use rpot::{communication, parse};
+use rpot::{
+    communication::{self},
+    parse::ParserVariant,
+};
 use tonic::{async_trait, transport::Server, Response, Status};
 use tracing::{error, info};
 
-struct RustParser {}
+struct RustParser {
+    parser: ParserVariant,
+}
 
 #[async_trait]
 impl communication::parser_server::Parser for RustParser {
@@ -14,7 +19,7 @@ impl communication::parser_server::Parser for RustParser {
 
         info!(path = file_path, "received rust file to parse");
 
-        let parsed = parse::parse_file_using_syn(file_path.clone()).map_err(|err| {
+        let parsed = self.parser.parse(file_path.clone()).map_err(|err| {
             error!("could not parse rust file {err}");
             Status::internal("could not parse rust file")
         });
@@ -37,7 +42,9 @@ async fn main() -> anyhow::Result<()> {
     let server_thread = tokio::spawn(async move {
         Server::builder()
             .add_service(communication::parser_server::ParserServer::new(
-                RustParser {},
+                RustParser {
+                    parser: ParserVariant::Regex,
+                },
             ))
             .serve(addr)
             .await

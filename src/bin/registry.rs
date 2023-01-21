@@ -1,10 +1,9 @@
 use anyhow::{bail, Context};
 use rpot::communication;
 use rpot::fts;
-use rpot::model;
+use rpot::model::{self, ParseContentWithPath};
 use rpot::read;
 use rpot::twoway;
-use serde::Serialize;
 use std::{collections::HashMap, path, sync::Arc};
 use tokio::sync::{mpsc, Mutex};
 use tonic::{transport::Server, Response, Status};
@@ -19,45 +18,6 @@ type Parsers = Arc<
         >,
     >,
 >;
-
-/// ParseContent and file_path merged into one struct.
-/// It's not sent via rpc like that not to duplicate data.
-#[derive(Debug, Clone, Default, Serialize)]
-struct ParseContentWithPath {
-    parse_content: model::Message,
-    file_path: String,
-}
-
-impl PartialEq for ParseContentWithPath {
-    fn eq(&self, other: &Self) -> bool {
-        self.parse_content.content == other.parse_content.content
-            && self.file_path == other.file_path
-    }
-}
-
-impl Eq for ParseContentWithPath {
-    fn assert_receiver_is_total_eq(&self) {}
-}
-
-impl PartialOrd for ParseContentWithPath {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        self.parse_content
-            .content
-            .partial_cmp(&other.parse_content.content)
-    }
-}
-
-impl Ord for ParseContentWithPath {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.parse_content.content.cmp(&other.parse_content.content)
-    }
-}
-
-impl fts::TokenProvider for ParseContentWithPath {
-    fn get_tokens(&self) -> Vec<String> {
-        self.parse_content.tokens.clone()
-    }
-}
 
 pub struct Registry {
     /// Receives file paths that will be sent to parsers.
@@ -131,7 +91,7 @@ impl Registry {
                             Ok(parsed) => {
                                 let file_path = parsed.file_path.clone();
                                 for parse_content in parsed.content {
-                                    fts.lock().await.push(ParseContentWithPath { parse_content: parse_content.into(), file_path: file_path.clone() });
+                                    fts.lock().await.push(ParseContentWithPath { message: parse_content.into(), file_path: file_path.clone() });
                                 }
                             },
                             Err(err) => {
@@ -243,7 +203,7 @@ async fn read_and_send_files(tx: &mpsc::Sender<String>) {
     info!("reading directory");
 
     read::visit_dirs(
-        "/home/kamil/programming/rust/rpotlight",
+        "/Users/kamilwyszynski/private/rplotlight",
         vec![read::IncludeOnly::Suffix(".rs".to_string())],
         vec![read::Exclude::Contains("target/debug".to_string())],
         |entry| files.push(entry.path().to_str().unwrap().to_string()),

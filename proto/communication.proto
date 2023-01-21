@@ -21,6 +21,8 @@ message ParseContent {
     ParsedType parsed_type = 1;
     string content = 2;
     repeated string tokens = 3;
+    string parsed_content = 4;
+    uint32 file_line = 5;
 }
 
 message ParseResponse {
