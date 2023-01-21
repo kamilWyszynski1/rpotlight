@@ -2,6 +2,7 @@ use std::{collections::HashMap, fmt::Debug};
 
 use rust_stemmers::{Algorithm, Stemmer};
 
+#[allow(dead_code)]
 const STOPWORDS: &[&str] = &[
     "a", "and", "be", "have", "i", "in", "of", "that", "the", "to",
 ];
@@ -47,23 +48,20 @@ where
     }
 
     pub fn delete(&mut self, id: String) -> Option<T> {
-        self.content
-            .iter()
-            .position(|t| t.id() == id)
-            .and_then(|index| {
-                // delete found index from indexes map
-                self.indexes.iter_mut().for_each(|(_, inxs)| {
-                    inxs.retain(|v| *v != index);
-                });
-                // decrease index of every "pointer" that is greater index that we are removing
-                self.indexes.iter_mut().for_each(|(_, inxs)| {
-                    inxs.iter_mut()
-                        .filter(|v| **v > index)
-                        .for_each(|v| *v -= 1);
-                });
-                // delete found index
-                Some(self.content.remove(index))
-            })
+        self.content.iter().position(|t| t.id() == id).map(|index| {
+            // delete found index from indexes map
+            self.indexes.iter_mut().for_each(|(_, inxs)| {
+                inxs.retain(|v| *v != index);
+            });
+            // decrease index of every "pointer" that is greater index that we are removing
+            self.indexes.iter_mut().for_each(|(_, inxs)| {
+                inxs.iter_mut()
+                    .filter(|v| **v > index)
+                    .for_each(|v| *v -= 1);
+            });
+            // delete found index
+            self.content.remove(index)
+        })
     }
 
     /// Takes statement, tokenizes it and retruns all possible content for those tokens.
@@ -77,11 +75,11 @@ where
         tokens.into_iter().for_each(|token| {
             self.indexes.iter().for_each(|(tkn, inxs)| {
                 if tkn.eq(&token) {
-                    inxs.into_iter().for_each(|inx| {
+                    inxs.iter().for_each(|inx| {
                         scores.entry(*inx).and_modify(|v| *v += 3).or_default();
                     })
                 } else if tkn.starts_with(token.as_str()) {
-                    inxs.into_iter().for_each(|inx| {
+                    inxs.iter().for_each(|inx| {
                         scores.entry(*inx).and_modify(|v| *v += 1).or_default();
                     })
                 }
@@ -159,11 +157,11 @@ mod tests {
         fts.push("The most exciting eureka moment I've had was when I realized that the instructions on food packets were just guidelines.");
         fts.push("The sun had set and so had his dreams.");
 
-        assert_eq!(fts.search("so").unwrap().sort(), vec![
+        assert_eq!(fts.search("so").unwrap(), vec![
             "He was so preoccupied with whether or not he could that he failed to stop to consider if he should.",
             "Honestly, I didn't care much for the first season, so I didn't bother with the second.",
             "The sun had set and so had his dreams.",
-        ].sort());
+        ]);
 
         assert_eq!(
             fts.search("had").unwrap()[0],

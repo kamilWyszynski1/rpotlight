@@ -31,7 +31,7 @@ async fn main() -> anyhow::Result<()> {
     // spawn task that will read files
     tokio::spawn(async move {
         file_provider
-            .read_and_send_files("/Users/kamilwyszynski/private/rplotlight", tx)
+            .read_and_send_files("/home/kamil/programming/rust/rpotlight", tx)
             .await
             .unwrap();
     });

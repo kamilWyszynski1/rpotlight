@@ -10,7 +10,7 @@ use prost::Message;
 use std::path::Path;
 use std::{collections::HashMap, path, sync::Arc};
 use tokio::sync::{mpsc, Mutex};
-use tonic::{transport::Server, Response, Status};
+use tonic::{Response, Status};
 use tracing::warn;
 use tracing::{error, info};
 
@@ -99,8 +99,11 @@ impl Registry {
                                 },
                             },
                             RegistryMessage::Remove(file_path) => {
-                                if let Some(_) = fts.lock().await.delete(file_path.clone()) {
+                                if fts.lock().await.delete(file_path.clone()).is_some() {
                                     info!(id = file_path, "deleted from fts");
+                                }
+                                if let Err(err) = parsed_tree.remove(&file_path) {
+                                    error!(method = "start_receiving", err = err.to_string(), "could not delete from db on RegistryMessage:Remove")
                                 }
                             },
                         },
@@ -260,14 +263,13 @@ impl FileInfoProvider {
                     Ok(_) => {
                         send_tree.insert(file.clone(), b"true")?;
                         tokio::spawn(async move {
-                            if let Err(err) =
-                                watcher::create_watcher(Path::new(&file).as_ref(), c).await
-                            {
-                                error!(
+                            match watcher::create_watcher(Path::new(&file), c).await {
+                                Ok(watcher) => todo!(),
+                                Err(err) => error!(
                                     err = err.to_string(),
                                     method = "read_and_send_files",
                                     "could not create file watcher"
-                                )
+                                ),
                             }
                         });
                     }

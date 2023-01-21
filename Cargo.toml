@@ -27,3 +27,6 @@ notify = "5.0.0"
 
 [build-dependencies]
 tonic-build = "0.8"
+
+[dev-dependencies]
+tempdir = "0.3.7"
