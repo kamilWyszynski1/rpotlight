@@ -1,10 +1,10 @@
 [package]
-name = "rplotlight"
+name = "rpotlight"
 version = "0.1.0"
 edition = "2021"
 
 [lib]
-name = "rplot"
+name = "rpot"
 path = "src/lib.rs"
 
 [dependencies]

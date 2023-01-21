@@ -1,6 +1,6 @@
 use anyhow::{bail, Context};
-use rplot::read;
-use rplot::{communication, parse};
+use rpot::read;
+use rpot::{communication, parse};
 use std::{collections::HashMap, path, sync::Arc};
 use tokio::sync::{mpsc, Mutex};
 use tonic::{transport::Server, Response, Status};
@@ -117,7 +117,7 @@ async fn main() -> anyhow::Result<()> {
             info!("reading directory");
 
             read::visit_dirs(
-                "/Users/kamilwyszynski/private/rplotlight/src",
+                "/Users/kamilwyszynski/private/rpotlight/src",
                 vec![read::IncludeOnly::Suffix("rs".to_string())],
                 vec![],
                 |entry| files.push(entry.path().to_str().unwrap().to_string()),
