@@ -10,8 +10,8 @@ enum ParseInfo {
     Struct(String),
 }
 
-pub fn parse_file_using_syn(path: String) -> anyhow::Result<ParseResponse> {
-    let mut file = File::open(&path)?;
+pub fn parse_file_using_syn(file_path: String) -> anyhow::Result<ParseResponse> {
+    let mut file = File::open(&file_path)?;
 
     let mut src = String::new();
     file.read_to_string(&mut src)?;
@@ -19,12 +19,10 @@ pub fn parse_file_using_syn(path: String) -> anyhow::Result<ParseResponse> {
     let syntax = syn::parse_file(&src)?;
 
     let mut response = ParseResponse {
-        file_path: path.to_string(),
+        file_path,
         ..Default::default()
     };
     for item in syntax.items {
-        let file_path = path.to_string();
-
         if let syn::Item::Impl(im) = item {
             for impl_item in im.items {
                 if let syn::ImplItem::Method(method) = impl_item {

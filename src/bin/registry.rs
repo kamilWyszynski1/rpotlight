@@ -1,6 +1,6 @@
 use anyhow::{bail, Context};
+use rpot::communication;
 use rpot::read;
-use rpot::{communication, parse};
 use std::{collections::HashMap, path, sync::Arc};
 use tokio::sync::{mpsc, Mutex};
 use tonic::{transport::Server, Response, Status};
@@ -85,7 +85,7 @@ async fn parse_file(
         _ => None,
     };
 
-    if let None = parser_type {
+    if parser_type.is_none() {
         bail!("could not find ParserType enum for {} file", file_path);
     }
 

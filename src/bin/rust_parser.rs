@@ -1,7 +1,6 @@
 use rpot::{communication, parse};
 use tonic::{async_trait, transport::Server, Response, Status};
 use tracing::{error, info};
-use tracing_subscriber;
 
 struct RustParser {}
 
