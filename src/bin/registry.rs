@@ -1,5 +1,7 @@
 use anyhow::{bail, Context};
+use prost::Message;
 use rpot::communication;
+use rpot::communication::ParseResponse;
 use rpot::fts;
 use rpot::model::{self, ParseContentWithPath};
 use rpot::read;
@@ -32,6 +34,9 @@ pub struct Registry {
 
     /// Structure is responsible for all operation related to storing indexes and searches.
     fts: Arc<Mutex<fts::FTS<ParseContentWithPath>>>,
+
+    /// Database will store information about prased files.
+    db: DB,
 }
 
 #[tonic::async_trait]
@@ -60,24 +65,49 @@ impl communication::register_server::Register for Registry {
     }
 }
 
+async fn load_fts_from_db(db: &DB) -> anyhow::Result<fts::FTS<ParseContentWithPath>> {
+    // load database content at start
+    let mut fts = fts::FTS::default();
+    let parsed_tree = db.clone().lock().await.open_tree("parsed")?;
+    for msg in parsed_tree.into_iter() {
+        let msg = msg?;
+        let (_, value) = msg;
+
+        let value = ParseResponse::decode(value.to_vec().as_slice())?;
+
+        let file_path = value.file_path.clone();
+        for parse_content in value.content {
+            fts.push(ParseContentWithPath {
+                message: parse_content.into(),
+                file_path: file_path.clone(),
+            });
+        }
+    }
+    Ok(fts)
+}
+
 impl Registry {
-    fn new(
+    async fn new(
         tx: mpsc::Receiver<String>,
         cli_tx: twoway::Receiver<communication::CliRequest, communication::CliResponse>,
-    ) -> Self {
-        Self {
+        db: DB,
+    ) -> anyhow::Result<Self> {
+        let fts = load_fts_from_db(&db).await?;
+        Ok(Self {
             tx: Some(tx),
             parsers: Arc::default(),
             cli_tx: Some(cli_tx),
-            fts: Arc::default(),
-        }
+            fts: Arc::new(Mutex::new(fts)),
+            db,
+        })
     }
 
-    fn start_receiving(&mut self) {
-        let mut tx = self.tx.take().unwrap();
+    async fn start_receiving(&mut self) -> anyhow::Result<()> {
+        let mut tx = self.tx.take().context("tx is not set")?;
         let parsers = self.parsers.clone();
         let fts = self.fts.clone();
-        let mut cli_tx = self.cli_tx.take().unwrap();
+        let mut cli_tx = self.cli_tx.take().context("cli_tx is not set")?;
+        let parsed_tree = self.db.clone().lock().await.open_tree("parsed")?;
 
         tokio::spawn(async move {
             loop {
@@ -88,8 +118,16 @@ impl Registry {
                             warn!("file_path channel has been closed");
                             continue
                         }
-                        match parse_file(file_path.unwrap(), parsers.clone()).await {
+                        let file_path = file_path.unwrap();
+
+                        match parse_file(file_path.clone(), parsers.clone()).await {
                             Ok(parsed) => {
+                                // convert parsed, proto message into bytes
+                                let mut buf = vec![];
+                                parsed.encode(&mut buf).unwrap();
+                                // write those bytes
+                                parsed_tree.insert(file_path.clone(), buf).unwrap();
+
                                 let file_path = parsed.file_path.clone();
                                 for parse_content in parsed.content {
                                     fts.lock().await.push(ParseContentWithPath { message: parse_content.into(), file_path: file_path.clone() });
@@ -129,6 +167,7 @@ impl Registry {
                 }
             }
         });
+        Ok(())
     }
 }
 
@@ -263,16 +302,16 @@ async fn main() -> anyhow::Result<()> {
     // install global collector configured based on RUST_LOG env var.
     tracing_subscriber::fmt::init();
 
-    let store = create_or_load_db("db")?;
+    let db = create_or_load_db("db")?;
 
     let addr = "[::1]:50051".parse()?;
     let cli_addr = "[::1]:50053".parse()?;
 
     let (tx, rx) = mpsc::channel::<String>(1);
     let (cli_tx, cli_rx) = twoway::channel(100);
-    let mut registry = Registry::new(rx, cli_rx);
+    let mut registry = Registry::new(rx, cli_rx, db.clone()).await?;
 
-    let file_provider = FileInfoProvider::new(store);
+    let file_provider = FileInfoProvider::new(db.clone());
 
     // spawn task that will read files
     tokio::spawn(async move {
@@ -293,7 +332,7 @@ async fn main() -> anyhow::Result<()> {
             .unwrap();
     });
 
-    registry.start_receiving();
+    registry.start_receiving().await?;
 
     Server::builder()
         .add_service(communication::register_server::RegisterServer::new(
