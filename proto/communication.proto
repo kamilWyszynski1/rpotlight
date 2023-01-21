@@ -1,0 +1,41 @@
+syntax = "proto3";
+package communication;
+
+message ParseRequest {
+    string file_path = 1;
+}
+
+message ParseDetails {
+    uint32 line_number = 1;
+    string whole_line = 2;
+}
+
+message ParseResponse {
+    string file_path = 1;
+    map<string, ParseDetails> functions = 2;
+    map<string, ParseDetails> variables = 3;
+    map<string, ParseDetails> structs = 4;
+}
+
+service Parser {
+    rpc Parse(ParseRequest) returns (ParseResponse);
+}
+
+enum ParserType {
+    RUST = 0;
+    GOLANG = 1;
+}
+
+message RegisterRequest {
+    string host = 1;
+    string port = 2;
+    ParserType p_type = 3;
+}
+
+message RegisterResponse {
+    string response = 1;
+}
+
+service Register {
+    rpc Register(RegisterRequest) returns (RegisterResponse);
+}
