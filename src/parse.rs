@@ -1,4 +1,5 @@
 use crate::communication::{ParseContent, ParseResponse, ParsedType};
+use crate::fts;
 use anyhow::Ok;
 use std::fs::File;
 use std::io::Read;
@@ -36,10 +37,12 @@ pub fn parse_file_using_syn(file_path: String) -> anyhow::Result<ParseResponse> 
         if let syn::Item::Impl(im) = item {
             for impl_item in im.items {
                 if let syn::ImplItem::Method(method) = impl_item {
+                    let method_name = method.sig.ident.to_string();
+
                     response.content.push(ParseContent {
                         parsed_type: ParsedType::Function.into(),
-                        content: method.sig.ident.to_string(),
-                        tokens: vec![],
+                        content: method_name.clone(),
+                        tokens: fts::tokenize(method_name),
                     });
                 }
             }
@@ -58,8 +61,8 @@ pub fn parse_file_using_syn(file_path: String) -> anyhow::Result<ParseResponse> 
             let (parsed_type, content) = info.rpc_type_and_content();
             response.content.push(ParseContent {
                 parsed_type,
-                content,
-                tokens: vec![],
+                content: content.clone(),
+                tokens: fts::tokenize(content),
             })
         }
     }

@@ -8,6 +8,7 @@ const STOPWORDS: &[&str] = &[
 
 pub fn tokenize<S: Into<String>>(text: S) -> Vec<String> {
     let en_stemmer = Stemmer::create(Algorithm::English);
+
     text.into()
         .split(|c: char| !c.is_alphabetic() && !c.is_numeric())
         .filter(|s| !s.is_empty())
@@ -40,7 +41,7 @@ where
     {
         self.content.push(content.clone());
 
-        let idx = self.content.len();
+        let idx = self.content.len() - 1;
         content
             .get_tokens()
             .into_iter()
@@ -52,6 +53,7 @@ where
         let statement: String = statement.into();
 
         let tokens = tokenize(statement);
+        dbg!(&tokens);
 
         let mut scores: HashMap<usize, usize> = HashMap::default();
         // calculate scores for each contents
@@ -63,6 +65,8 @@ where
                 None::<Vec<usize>>
             });
         });
+
+        dbg!(&scores);
 
         // change into vector and sort
         let mut hash_vec: Vec<(usize, usize)> = scores.into_iter().collect();

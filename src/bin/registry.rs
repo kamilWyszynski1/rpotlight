@@ -106,7 +106,7 @@ impl Registry {
                             Ok(parsed) => {
                                 let file_path = parsed.file_path.clone();
                                 for parse_content in parsed.content {
-                                    fts.lock().await.push(ParseContentWithPath { parse_content: parse_content.into() ,file_path: file_path.clone() });
+                                    fts.lock().await.push(ParseContentWithPath { parse_content: parse_content.into(), file_path: file_path.clone() });
                                 }
                             },
                             Err(err) => {
@@ -126,6 +126,7 @@ impl Registry {
 
                         match communication::CliType::from_i32(cmd.c_type).unwrap() {
                             communication::CliType::Search => {
+                                info!("fts content: {:?}", fts);
                                 let r = fts.lock().await.search(content.clone());
                                 let response: String = match r {
                                     Some::<Vec<ParseContentWithPath>>(found) => {
