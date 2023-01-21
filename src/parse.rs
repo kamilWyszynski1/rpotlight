@@ -1,4 +1,4 @@
-use crate::communication::{ParseDetails, ParseResponse};
+use crate::communication::{ParseContent, ParseResponse, ParsedType};
 use anyhow::Ok;
 use std::fs::File;
 use std::io::Read;
@@ -8,6 +8,16 @@ enum ParseInfo {
     Function(String),
     Variable(String),
     Struct(String),
+}
+
+impl ParseInfo {
+    fn rpc_type_and_content(self) -> (i32, String) {
+        match self {
+            ParseInfo::Function(value) => (ParsedType::Function.into(), value),
+            ParseInfo::Variable(value) => (ParsedType::Variable.into(), value),
+            ParseInfo::Struct(value) => (ParsedType::Struct.into(), value),
+        }
+    }
 }
 
 pub fn parse_file_using_syn(file_path: String) -> anyhow::Result<ParseResponse> {
@@ -20,19 +30,17 @@ pub fn parse_file_using_syn(file_path: String) -> anyhow::Result<ParseResponse> 
 
     let mut response = ParseResponse {
         file_path,
-        ..Default::default()
+        content: vec![],
     };
     for item in syntax.items {
         if let syn::Item::Impl(im) = item {
             for impl_item in im.items {
                 if let syn::ImplItem::Method(method) = impl_item {
-                    response.functions.insert(
-                        method.sig.ident.to_string(),
-                        ParseDetails {
-                            line_number: 0,
-                            whole_line: "".into(),
-                        },
-                    );
+                    response.content.push(ParseContent {
+                        parsed_type: ParsedType::Function.into(),
+                        content: method.sig.ident.to_string(),
+                        tokens: vec![],
+                    });
                 }
             }
         } else {
@@ -47,30 +55,12 @@ pub fn parse_file_using_syn(file_path: String) -> anyhow::Result<ParseResponse> 
                 syn::Item::Type(t) => ParseInfo::Struct(t.ident.to_string()),
                 _ => continue,
             };
-
-            match info {
-                ParseInfo::Function(f) => response.functions.insert(
-                    f,
-                    ParseDetails {
-                        line_number: 0,
-                        whole_line: "".into(),
-                    },
-                ),
-                ParseInfo::Variable(v) => response.variables.insert(
-                    v,
-                    ParseDetails {
-                        line_number: 0,
-                        whole_line: "".into(),
-                    },
-                ),
-                ParseInfo::Struct(s) => response.structs.insert(
-                    s,
-                    ParseDetails {
-                        line_number: 0,
-                        whole_line: "".into(),
-                    },
-                ),
-            };
+            let (parsed_type, content) = info.rpc_type_and_content();
+            response.content.push(ParseContent {
+                parsed_type,
+                content,
+                tokens: vec![],
+            })
         }
     }
     Ok(response)

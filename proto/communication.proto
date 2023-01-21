@@ -1,6 +1,7 @@
 syntax = "proto3";
 package communication;
 
+// ===== PARSERS =====
 message ParseRequest {
     string file_path = 1;
 }
@@ -10,11 +11,21 @@ message ParseDetails {
     string whole_line = 2;
 }
 
+enum ParsedType {
+    Function = 0;
+    Variable = 1;
+    Struct   = 2;
+}
+
+message ParseContent {
+    ParsedType parsed_type = 1;
+    string content = 2;
+    repeated string tokens = 3;
+}
+
 message ParseResponse {
     string file_path = 1;
-    map<string, ParseDetails> functions = 2;
-    map<string, ParseDetails> variables = 3;
-    map<string, ParseDetails> structs = 4;
+    repeated ParseContent content = 2;
 }
 
 service Parser {
@@ -26,6 +37,7 @@ enum ParserType {
     GOLANG = 1;
 }
 
+// ===== REGISTRY =====
 message RegisterRequest {
     string host = 1;
     string port = 2;
@@ -38,4 +50,22 @@ message RegisterResponse {
 
 service Register {
     rpc Register(RegisterRequest) returns (RegisterResponse);
+}
+
+enum CliType {
+    SEARCH = 0; 
+}
+
+// ===== CLI =====
+message CliRequest {
+    CliType c_type = 1;
+    string content = 2;
+}
+
+message CliResponse {
+    string response = 1;
+}
+
+service Cli {
+    rpc Command(CliRequest) returns (CliResponse);
 }

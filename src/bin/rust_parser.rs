@@ -12,14 +12,15 @@ impl communication::parser_server::Parser for RustParser {
     ) -> Result<Response<communication::ParseResponse>, Status> {
         let file_path = request.into_inner().file_path;
 
-        info!("received rust file to parse: {}", &file_path);
+        info!(path = file_path, "received rust file to parse");
 
-        Ok(Response::new(
-            parse::parse_file_using_syn(file_path).map_err(|err| {
-                error!("could not parse rust file {err}");
-                Status::internal("could not parse rust file")
-            })?,
-        ))
+        let parsed = parse::parse_file_using_syn(file_path.clone()).map_err(|err| {
+            error!("could not parse rust file {err}");
+            Status::internal("could not parse rust file")
+        });
+        info!(path = file_path, success = parsed.is_ok(), "file parsed");
+
+        Ok(Response::new(parsed?))
     }
 }
 
@@ -33,7 +34,7 @@ async fn main() -> anyhow::Result<()> {
 
     let addr = "[::1]:50052".parse()?;
 
-    tokio::spawn(async move {
+    let server_thread = tokio::spawn(async move {
         Server::builder()
             .add_service(communication::parser_server::ParserServer::new(
                 RustParser {},
@@ -52,5 +53,6 @@ async fn main() -> anyhow::Result<()> {
         .await
         .unwrap();
 
+    server_thread.await?;
     Ok(())
 }

@@ -2,7 +2,7 @@ use anyhow::Ok;
 use std::path::Path;
 use walkdir::DirEntry;
 
-type ExcludeFn = Box<dyn Fn(&str) -> bool + 'static>;
+type FilterFn = Box<dyn Fn(&str) -> bool + 'static>;
 
 pub enum Exclude {
     Contains(String),
@@ -11,7 +11,7 @@ pub enum Exclude {
 }
 
 impl Exclude {
-    fn into_filter(self) -> ExcludeFn {
+    fn into_filter(self) -> FilterFn {
         match self {
             Exclude::Contains(value) => Box::new(move |e: &str| -> bool { !e.contains(&value) }),
             Exclude::Prefix(value) => Box::new(move |e: &str| -> bool { !e.starts_with(&value) }),
@@ -25,16 +25,20 @@ pub enum IncludeOnly {
 }
 
 impl IncludeOnly {
-    fn into_filter(self) -> ExcludeFn {
+    fn into_filter(self) -> FilterFn {
         match self {
             IncludeOnly::Suffix(value) => Box::new(move |e: &str| -> bool { e.ends_with(&value) }),
         }
     }
 }
 
-fn merge_predicates(excludes: Vec<ExcludeFn>) -> ExcludeFn {
+fn merge_predicates(predicates: Vec<FilterFn>) -> FilterFn {
+    if predicates.is_empty() {
+        return Box::new(|_: &str| true);
+    }
+
     Box::new(move |e: &str| -> bool {
-        for ex in &excludes {
+        for ex in &predicates {
             if ex(e) {
                 return true;
             }
@@ -43,7 +47,7 @@ fn merge_predicates(excludes: Vec<ExcludeFn>) -> ExcludeFn {
     })
 }
 
-// one possible implementation of walking a directory only visiting files
+/// one possible implementation of walking a directory only visiting files
 pub fn visit_dirs<P, F>(
     dir: P,
     includes: Vec<IncludeOnly>,
@@ -78,9 +82,12 @@ mod tests {
 
     #[test]
     fn test_visit_dirs() -> anyhow::Result<()> {
-        super::visit_dirs("/", vec![], vec![], |entry| {
-            println!("{}", entry.path().to_str().unwrap().to_string())
-        })?;
+        super::visit_dirs(
+            "/home/kamil/programming/rust/rpotlight",
+            vec![super::IncludeOnly::Suffix(".rs".to_string())],
+            vec![super::Exclude::Contains("target/debug".to_string())],
+            |entry| println!("{}", entry.path().to_str().unwrap()),
+        )?;
         Ok(())
     }
 }
