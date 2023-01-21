@@ -16,10 +16,11 @@ async fn main() -> anyhow::Result<()> {
         serde_json::from_str(response.into_inner().response.as_str())?;
 
     println!("searches:");
+    let crab = '\u{1F980}';
     for content in a {
         println!(
-            "\t {} in {}:{}",
-            content.message.parsed_content, content.file_path, content.message.file_line
+            "\t {0}{1: <20} in {2}:{3}",
+            crab, content.message.parsed_content, content.file_path, content.message.file_line
         )
     }
 

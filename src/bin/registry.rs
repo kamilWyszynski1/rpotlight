@@ -4,6 +4,7 @@ use rpot::fts;
 use rpot::model::{self, ParseContentWithPath};
 use rpot::read;
 use rpot::twoway;
+use std::path::Path;
 use std::{collections::HashMap, path, sync::Arc};
 use tokio::sync::{mpsc, Mutex};
 use tonic::{transport::Server, Response, Status};
@@ -197,35 +198,72 @@ impl communication::cli_server::Cli for CliServer {
     }
 }
 
-async fn read_and_send_files(tx: &mpsc::Sender<String>) {
-    let mut files = vec![];
+struct FileInfoProvider {
+    db: DB,
+}
 
-    info!("reading directory");
+impl FileInfoProvider {
+    fn new(db: DB) -> Self {
+        Self { db }
+    }
 
-    read::visit_dirs(
-        "/Users/kamilwyszynski/private/rplotlight",
-        vec![read::IncludeOnly::Suffix(".rs".to_string())],
-        vec![read::Exclude::Contains("target/debug".to_string())],
-        |entry| files.push(entry.path().to_str().unwrap().to_string()),
-    )
-    .unwrap();
+    async fn read_and_send_files<P: AsRef<Path>>(
+        &self,
+        path: P,
+        tx: &mpsc::Sender<String>,
+    ) -> anyhow::Result<()> {
+        let path = path.as_ref();
+        loop {
+            tokio::time::sleep(std::time::Duration::new(10, 0)).await;
+            let mut files = vec![];
 
-    info!("found {} files", files.len());
+            info!("reading directory");
 
-    for file in files {
-        match tx.send(file).await {
-            Ok(_) => {}
-            Err(err) => {
-                error!(error = err.0, "could not send message");
+            read::visit_dirs(
+                path,
+                vec![read::IncludeOnly::Suffix(".rs".to_string())],
+                vec![read::Exclude::Contains("target/debug".to_string())],
+                |entry| files.push(entry.path().to_str().unwrap().to_string()),
+            )?;
+
+            info!("found {} files", files.len());
+
+            // separate tree for send information.
+            let send_tree = self.db.lock().await.open_tree("send")?;
+
+            for file in files {
+                let was_sent = send_tree.get(file.clone())?;
+                if was_sent.is_some() {
+                    info!(file = file.clone(), "file was already sent to process");
+                    continue;
+                }
+                match tx.send(file.clone()).await {
+                    Ok(_) => {
+                        send_tree.insert(file, b"true")?;
+                    }
+                    Err(err) => {
+                        error!(error = err.0, "could not send message");
+                    }
+                }
             }
         }
     }
+}
+
+/// Type wrap for database.
+type DB = Arc<Mutex<sled::Db>>;
+
+fn create_or_load_db<P: AsRef<Path>>(p: P) -> anyhow::Result<DB> {
+    let tree = sled::open(p)?;
+    Ok(Arc::new(Mutex::new(tree)))
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // install global collector configured based on RUST_LOG env var.
     tracing_subscriber::fmt::init();
+
+    let store = create_or_load_db("db")?;
 
     let addr = "[::1]:50051".parse()?;
     let cli_addr = "[::1]:50053".parse()?;
@@ -234,12 +272,14 @@ async fn main() -> anyhow::Result<()> {
     let (cli_tx, cli_rx) = twoway::channel(100);
     let mut registry = Registry::new(rx, cli_rx);
 
+    let file_provider = FileInfoProvider::new(store);
+
     // spawn task that will read files
     tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(std::time::Duration::new(10, 0)).await;
-            read_and_send_files(&tx).await;
-        }
+        file_provider
+            .read_and_send_files("/Users/kamilwyszynski/private/rplotlight", &tx)
+            .await
+            .unwrap();
     });
 
     // spawn task that will receive cli rpc calls

@@ -66,7 +66,11 @@ where
             //     None::<Vec<usize>>
             // });
             self.indexes.iter().for_each(|(tkn, inxs)| {
-                if tkn.starts_with(token.as_str()) {
+                if tkn.eq(&token) {
+                    inxs.into_iter().for_each(|inx| {
+                        scores.entry(*inx).and_modify(|v| *v += 3).or_default();
+                    })
+                } else if tkn.starts_with(token.as_str()) {
                     inxs.into_iter().for_each(|inx| {
                         scores.entry(*inx).and_modify(|v| *v += 1).or_default();
                     })
