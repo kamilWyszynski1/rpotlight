@@ -6,6 +6,7 @@ use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tonic::transport::Server;
+use tracing::error;
 
 fn create_or_load_db<P: AsRef<Path>>(p: P) -> anyhow::Result<registry::DB> {
     let tree = sled::open(p)?;
@@ -26,25 +27,29 @@ async fn main() -> anyhow::Result<()> {
     let (cli_tx, cli_rx) = twoway::channel(100);
     let mut registry = registry::Registry::new(rx, cli_rx, db.clone()).await?;
 
-    let file_provider = registry::FileInfoProvider::new(db.clone());
+    let file_provider = registry::FileInfoProvider::new(db.clone(), tx).await?;
 
     // spawn task that will read files
     tokio::spawn(async move {
-        file_provider
-            .read_and_send_files("/home/kamil/programming/rust/rpotlight", tx)
+        if let Err(err) = file_provider
+            .read_and_send_files("/home/kamil/programming/rust/rpotlight")
             .await
-            .unwrap();
+        {
+            error!(err = err.to_string(), "read_and-send_files failed");
+        }
     });
 
     // spawn task that will receive cli rpc calls
     tokio::spawn(async move {
-        Server::builder()
+        if let Err(err) = Server::builder()
             .add_service(communication::cli_server::CliServer::new(
                 cli::CliServer::new(cli_tx),
             ))
             .serve(cli_addr)
             .await
-            .unwrap();
+        {
+            error!(err = err.to_string(), "cli server failed");
+        }
     });
 
     registry.start_receiving().await?;

@@ -7,10 +7,13 @@ use crate::twoway;
 use crate::watcher;
 use anyhow::{bail, Context};
 use prost::Message;
+use sled::Tree;
+use std::io;
 use std::path::Path;
 use std::{collections::HashMap, path, sync::Arc};
 use tokio::sync::{mpsc, Mutex};
 use tonic::{Response, Status};
+use tracing::debug;
 use tracing::warn;
 use tracing::{error, info};
 
@@ -30,9 +33,18 @@ pub type DB = Arc<Mutex<sled::Db>>;
 #[derive(Debug, Clone, PartialEq)]
 pub enum RegistryMessage {
     /// Orders file parse, registry will call registered parsers for that.
-    Parse(String),
+    Parse { file_path: String, new: bool },
     /// Removes parsed file from registry's fts. Cause by e.g. file deletion.
     Remove(String),
+}
+
+impl RegistryMessage {
+    pub fn is_remove(&self) -> bool {
+        if let Self::Remove(_) = self {
+            return true;
+        }
+        false
+    }
 }
 
 pub struct Registry {
@@ -61,7 +73,7 @@ impl Registry {
         let fts = load_fts_from_db(&db).await?;
         Ok(Self {
             rx: Some(rx),
-            parsers: Arc::default(),
+            parsers: Default::default(),
             cli_tx: Some(cli_tx),
             fts: Arc::new(Mutex::new(fts)),
             db,
@@ -81,8 +93,10 @@ impl Registry {
                     // parsers things
                     message = tx.recv() => match message {
                         Some(message) => match message {
-                            RegistryMessage::Parse(file_path) => match parse_file(file_path.clone(), parsers.clone()).await {
+                            RegistryMessage::Parse { file_path, new } => match parse_file(file_path.clone(), parsers.clone()).await {
                                 Ok(parsed) => {
+                                    info!(file_path = &file_path, new = new, "received parse message");
+
                                     // convert parsed, proto message into bytes
                                     let mut buf = vec![];
                                     parsed.encode(&mut buf).unwrap();
@@ -99,8 +113,10 @@ impl Registry {
                                 },
                             },
                             RegistryMessage::Remove(file_path) => {
-                                if fts.lock().await.delete(file_path.clone()).is_some() {
-                                    info!(id = file_path, "deleted from fts");
+                                info!(file_path = &file_path, "received remove message");
+                                match fts.lock().await.delete(file_path.clone()) {
+                                    Some(_) => info!(id = file_path, "deleted from fts"),
+                                    None => info!(id=file_path, "could not delete from fts"),
                                 }
                                 if let Err(err) = parsed_tree.remove(&file_path) {
                                     error!(method = "start_receiving", err = err.to_string(), "could not delete from db on RegistryMessage:Remove")
@@ -121,7 +137,6 @@ impl Registry {
 
                         match communication::CliType::from_i32(cmd.c_type).unwrap() {
                             communication::CliType::Search => {
-                                info!("fts content: {:?}", fts);
                                 let r = fts.lock().await.search(content.clone());
                                 let response: String = match r {
                                     Some::<Vec<ParseContentWithPath>>(found) => {
@@ -168,6 +183,7 @@ impl communication::register_server::Register for Registry {
     }
 }
 
+/// Reads all parsed data from database and creates new FTS from that data.
 async fn load_fts_from_db(db: &DB) -> anyhow::Result<fts::FTS<ParseContentWithPath>> {
     // load database content at start
     let mut fts = fts::FTS::default();
@@ -187,6 +203,48 @@ async fn load_fts_from_db(db: &DB) -> anyhow::Result<fts::FTS<ParseContentWithPa
         }
     }
     Ok(fts)
+}
+
+/// Reads all parsed data from database and for each entry creates watcher.
+/// Watcher is needed in case of already parsed, stored files that will be deleted later on.
+async fn load_watcher_manager_from_db(
+    db: &DB,
+    tx: mpsc::Sender<RegistryMessage>,
+) -> anyhow::Result<watcher::WatcherManager> {
+    // load database content at start
+    let manager = watcher::WatcherManager::default();
+    let parsed_tree = db.clone().lock().await.open_tree("parsed")?;
+    for msg in parsed_tree.into_iter() {
+        let msg = msg?;
+        let (_, value) = msg;
+
+        let value = ParseResponse::decode(value.to_vec().as_slice())?;
+        let file_path = value.file_path.clone();
+
+        if let Err(err) = manager
+            .watcher_proxy(Path::new(&file_path), tx.clone())
+            .await
+        {
+            if let Some(nerr) = err.downcast_ref::<notify::Error>() {
+                match nerr.kind {
+                    notify::ErrorKind::Io(ref io) => {
+                        if io::ErrorKind::NotFound == io.kind() {
+                            // finally we are sure that file was removed
+                            tx.send(RegistryMessage::Remove(file_path.clone())).await?;
+                            continue;
+                        }
+                    }
+                    _ => (),
+                }
+            }
+            error!(
+                err = err.to_string(),
+                method = "load_watcher_manager_from_db",
+                "unknown error"
+            )
+        }
+    }
+    Ok(manager)
 }
 
 async fn parse_file(
@@ -220,18 +278,36 @@ async fn parse_file(
 
 pub struct FileInfoProvider {
     db: DB,
+
+    /// Sender for notifing Registry about changes.
+    tx: mpsc::Sender<RegistryMessage>,
+
+    /// Manager handles watchers, notifications and shutdown when file is deleted.
+    watcher_manager: watcher::WatcherManager,
 }
 
 impl FileInfoProvider {
-    pub fn new(db: DB) -> Self {
-        Self { db }
+    pub async fn new(db: DB, tx: mpsc::Sender<RegistryMessage>) -> anyhow::Result<Self> {
+        let watcher_manager = load_watcher_manager_from_db(&db, tx.clone()).await?;
+
+        Ok(Self {
+            db,
+            tx,
+            watcher_manager,
+        })
     }
 
-    pub async fn read_and_send_files<P: AsRef<Path>>(
-        &self,
-        path: P,
-        tx: mpsc::Sender<RegistryMessage>,
-    ) -> anyhow::Result<()> {
+    async fn spawn_watcher(&self, path: &Path) -> anyhow::Result<()> {
+        self.watcher_manager
+            .watcher_proxy(path, self.tx.clone())
+            .await
+    }
+
+    async fn send_tree(&self) -> anyhow::Result<Tree> {
+        Ok(self.db.lock().await.open_tree("send")?)
+    }
+
+    pub async fn read_and_send_files<P: AsRef<Path>>(&self, path: P) -> anyhow::Result<()> {
         let path = path.as_ref();
 
         loop {
@@ -250,28 +326,26 @@ impl FileInfoProvider {
             info!("found {} files", files.len());
 
             // separate tree for send information.
-            let send_tree = self.db.lock().await.open_tree("send")?;
+            let send_tree = self.send_tree().await?;
 
-            for file in files {
-                let was_sent = send_tree.get(file.clone())?;
+            for file_path in files {
+                let was_sent = send_tree.get(file_path.clone())?;
                 if was_sent.is_some() {
-                    info!(file = file.clone(), "file was already sent to process");
+                    debug!(file = file_path.clone(), "file was already sent to process");
                     continue;
                 }
-                let c = tx.clone();
-                match tx.send(RegistryMessage::Parse(file.clone())).await {
+                match self
+                    .tx
+                    .send(RegistryMessage::Parse {
+                        file_path: file_path.clone(),
+                        new: true,
+                    })
+                    .await
+                {
                     Ok(_) => {
-                        send_tree.insert(file.clone(), b"true")?;
-                        tokio::spawn(async move {
-                            match watcher::create_watcher(Path::new(&file), c).await {
-                                Ok(watcher) => todo!(),
-                                Err(err) => error!(
-                                    err = err.to_string(),
-                                    method = "read_and_send_files",
-                                    "could not create file watcher"
-                                ),
-                            }
-                        });
+                        send_tree.insert(file_path.clone(), b"true")?;
+
+                        self.spawn_watcher(Path::new(&file_path)).await?;
                     }
                     Err(err) => {
                         error!(

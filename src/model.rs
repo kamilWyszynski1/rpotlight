@@ -58,7 +58,9 @@ pub struct ParseContentWithPath {
 
 impl PartialEq for ParseContentWithPath {
     fn eq(&self, other: &Self) -> bool {
-        self.message.content == other.message.content && self.file_path == other.file_path
+        self.message.content == other.message.content
+            && self.file_path == other.file_path
+            && self.message.file_line == other.message.file_line
     }
 }
 
@@ -84,6 +86,6 @@ impl fts::TokenProvider for ParseContentWithPath {
     }
 
     fn id(&self) -> String {
-        self.message.parsed_content.clone()
+        self.file_path.clone()
     }
 }

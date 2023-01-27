@@ -38,6 +38,10 @@ where
     T: TokenProvider + Clone + Ord + Debug,
 {
     pub fn push(&mut self, content: T) {
+        if self.content.contains(&content) {
+            // do not add the same entry twice
+            return;
+        }
         self.content.push(content.clone());
 
         let idx = self.content.len() - 1;
@@ -48,7 +52,7 @@ where
     }
 
     pub fn delete(&mut self, id: String) -> Option<T> {
-        self.content.iter().position(|t| t.id() == id).map(|index| {
+        self.content.iter().position(|t|t.id() == id).map(|index| {
             // delete found index from indexes map
             self.indexes.iter_mut().for_each(|(_, inxs)| {
                 inxs.retain(|v| *v != index);
@@ -95,7 +99,7 @@ where
         hash_vec.sort_by(|a, b| {
             let cmp = b.1 .0.cmp(&a.1 .0); // DESC by score
             if cmp.is_eq() {
-                a.1 .1.cmp(&b.1 .1) // ASC by alpabetically
+                a.1 .1.cmp(&b.1 .1) // ASC alphabetically
             } else {
                 cmp
             }
@@ -114,6 +118,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    use crate::model::{Message, ParseContentWithPath, ParsedType};
+
     use super::{tokenize, TokenProvider, FTS};
 
     impl TokenProvider for &str {
@@ -141,6 +147,30 @@ mod tests {
 
         assert_eq!(fts.search("what").unwrap(), vec!["lol what"]);
         assert_eq!(fts.search("lol").unwrap(), vec!["lol", "lol what"]);
+    }
+
+    #[test]
+    fn test_remove_real_content() {
+        let mut fts = FTS::default();
+
+        let entry = ParseContentWithPath {
+            message: Message {
+                parsed_type: ParsedType::Function,
+                content: "fn foo() {}".to_string(),
+                tokens: vec!["foo".to_string()],
+                parsed_content: "foo".to_string(),
+                file_line: 0,
+            },
+            file_path: "file".to_string(),
+        };
+
+        fts.push(entry.clone());
+        let got = fts.search("foo").unwrap();
+        assert_eq!(1, got.len());
+        assert_eq!(entry, got[0]);
+
+        let removed = fts.delete("file".to_string()).unwrap();
+        assert_eq!(entry, removed);
     }
 
     #[test]

@@ -153,6 +153,8 @@ where
     Ok(BufReader::new(file).lines())
 }
 
+fn boo() {}
+
 // mod test {
 //     use super::{Parser, RegexParser};
 
