@@ -47,6 +47,10 @@ impl RegistryMessage {
     }
 }
 
+/// Structure handles all functionalities related to an app.
+/// Various parsers can register here so that specific files will be handled by them.
+/// Registry listens for cli and internal messages for communication.
+/// It manages database state as well.
 pub struct Registry {
     /// Receives file paths that will be sent to parsers.
     rx: Option<mpsc::Receiver<RegistryMessage>>,
@@ -226,15 +230,12 @@ async fn load_watcher_manager_from_db(
             .await
         {
             if let Some(nerr) = err.downcast_ref::<notify::Error>() {
-                match nerr.kind {
-                    notify::ErrorKind::Io(ref io) => {
-                        if io::ErrorKind::NotFound == io.kind() {
-                            // finally we are sure that file was removed
-                            tx.send(RegistryMessage::Remove(file_path.clone())).await?;
-                            continue;
-                        }
+                if let notify::ErrorKind::Io(ref io) = nerr.kind {
+                    if io::ErrorKind::NotFound == io.kind() {
+                        // finally we are sure that file was removed
+                        tx.send(RegistryMessage::Remove(file_path.clone())).await?;
+                        continue;
                     }
-                    _ => (),
                 }
             }
             error!(

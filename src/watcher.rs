@@ -6,8 +6,12 @@ use tokio::sync::{mpsc, Mutex};
 use tracing::{error, info};
 
 /// Manager handles creation and shutdown of watchers.
+/// All messages are proxied by manager which is listening for Remove events.
+/// If one occurs, watcher is closed.
 #[derive(Debug, Default)]
 pub struct WatcherManager {
+    /// Contains currently running watchers. If watcher receives remove message
+    /// it will be deleted from state and its tokio task will end.
     state: Arc<Mutex<HashMap<String, INotifyWatcher>>>,
 }
 
@@ -54,6 +58,7 @@ impl WatcherManager {
     }
 }
 
+/// Creates single watcher and configures event handler for that.
 fn create_watcher(
     path: &Path,
     tx: mpsc::Sender<RegistryMessage>,

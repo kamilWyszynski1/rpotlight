@@ -152,18 +152,3 @@ where
     let file = File::open(path)?;
     Ok(BufReader::new(file).lines())
 }
-
-fn boo() {}
-
-// mod test {
-//     use super::{Parser, RegexParser};
-
-//     #[test]
-//     fn test_regex_parser() {
-//         let resp =
-//             RegexParser::parse("/Users/kamilwyszynski/private/rplotlight/src/parse.rs".to_string())
-//                 .unwrap();
-
-//         println!("{:?}", resp)
-//     }
-// }
