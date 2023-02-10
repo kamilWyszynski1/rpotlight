@@ -64,10 +64,14 @@ fn create_watcher(
     tx: mpsc::Sender<RegistryMessage>,
 ) -> anyhow::Result<INotifyWatcher> {
     let path_clone = path.as_os_str().to_str().unwrap().to_string();
+    let file_path = path.to_path_buf();
 
     let mut watcher = notify::recommended_watcher(move |res: Result<Event, notify::Error>| {
         if let Err(err) = match res {
             Ok(event) => {
+                if !event.paths.contains(&file_path) {
+                    return;
+                }
                 info!(
                     function = "create_watcher",
                     path = &path_clone,
@@ -88,18 +92,18 @@ fn create_watcher(
                     .context("could not send modify event")
                 };
 
+                // NOTICE: there will be multiple events for single file operation,
+                // e.g. file deletion generated Modify(Metadata(_)), Access(_) and Remove(_) events
                 match event.kind {
                     EventKind::Modify(modify_kind) => match modify_kind {
+                        notify::event::ModifyKind::Metadata(_) => Ok(()),
                         // modify name is some kind of alias on file deletion
                         notify::event::ModifyKind::Name(_) => send_remove(),
                         // default modify is simple modification
                         _ => send_modify(),
                     },
                     EventKind::Remove(_) => send_remove(),
-                    _ => {
-                        println!("here");
-                        Ok(())
-                    }
+                    _ => Ok(()),
                 }
             }
             Err(e) => Err(anyhow::format_err!("{}", e.to_string())),
@@ -109,7 +113,7 @@ fn create_watcher(
     })?;
 
     watcher
-        .watch(path, RecursiveMode::Recursive)
+        .watch(path.parent().unwrap(), RecursiveMode::Recursive)
         .with_context(|| format!("could not watch {:?} file", path))?;
 
     Ok(watcher)
@@ -127,8 +131,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_watcher() -> anyhow::Result<()> {
-        tracing_subscriber::fmt::init();
-
         let tmp_dir = TempDir::new("example")?;
         let file_path = tmp_dir.path().join("foo.rs");
         let mut file = File::create(&file_path)?;
@@ -155,8 +157,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_watcher_manager() -> anyhow::Result<()> {
-        tracing_subscriber::fmt::init();
-
         let tmp_dir = TempDir::new("example")?;
         let file_path = tmp_dir.path().join("foo.rs");
         let mut file = File::create(&file_path)?;
@@ -179,6 +179,38 @@ mod tests {
         );
 
         assert_eq!(manager.state.lock().await.len(), 0);
+
+        drop(c_tx);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_watcher_manager_modify() -> anyhow::Result<()> {
+        let tmp_dir = TempDir::new("example")?;
+        let file_path = tmp_dir.path().join("foo.rs");
+        let mut file = File::create(&file_path)?;
+        file.write_all("fn foo() {}".as_bytes())?;
+
+        let (tx, mut rx) = mpsc::channel(10);
+        let c_tx = tx.clone();
+
+        let manager = WatcherManager::default();
+        manager.watcher_proxy(&file_path, tx).await?;
+        assert_eq!(manager.state.lock().await.len(), 1);
+
+        tokio::time::sleep(Duration::new(0, 500)).await;
+        file.write_all("fn boo() {}".as_bytes())?;
+
+        let msg = rx.recv().await.unwrap();
+        assert_eq!(
+            msg,
+            registry::RegistryMessage::Parse {
+                file_path: file_path.to_str().unwrap().to_string(),
+                new: false
+            }
+        );
+
+        assert_eq!(manager.state.lock().await.len(), 1);
 
         drop(c_tx);
         Ok(())

@@ -51,8 +51,8 @@ where
             .for_each(|token| self.indexes.entry(token).or_default().push(idx));
     }
 
-    pub fn delete(&mut self, id: String) -> Option<T> {
-        self.content.iter().position(|t|t.id() == id).map(|index| {
+    pub fn delete(&mut self, id: &str) -> Option<T> {
+        self.content.iter().position(|t| t.id() == id).map(|index| {
             // delete found index from indexes map
             self.indexes.iter_mut().for_each(|(_, inxs)| {
                 inxs.retain(|v| *v != index);
@@ -139,11 +139,11 @@ mod tests {
         fts.push("what");
         fts.push("lol");
         assert_eq!(fts.content.len(), 3);
-        assert_eq!(fts.indexes.iter().map(|(_, v)| v.len()).sum::<usize>(), 4);
+        assert_eq!(fts.indexes.values().map(|v| v.len()).sum::<usize>(), 4);
 
-        fts.delete("what".to_string());
+        fts.delete("what");
         assert_eq!(fts.content.len(), 2);
-        assert_eq!(fts.indexes.iter().map(|(_, v)| v.len()).sum::<usize>(), 3);
+        assert_eq!(fts.indexes.values().map(|v| v.len()).sum::<usize>(), 3);
 
         assert_eq!(fts.search("what").unwrap(), vec!["lol what"]);
         assert_eq!(fts.search("lol").unwrap(), vec!["lol", "lol what"]);
@@ -169,7 +169,7 @@ mod tests {
         assert_eq!(1, got.len());
         assert_eq!(entry, got[0]);
 
-        let removed = fts.delete("file".to_string()).unwrap();
+        let removed = fts.delete("file").unwrap();
         assert_eq!(entry, removed);
     }
 

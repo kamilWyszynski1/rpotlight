@@ -107,9 +107,14 @@ impl Registry {
                                     // write those bytes
                                     parsed_tree.insert(file_path.clone(), buf).unwrap();
 
+                                    // clear fts before writting (possibilly) data of already stored and modified file
                                     let file_path = parsed.file_path.clone();
+                                    let mut locked_fts =  fts.lock().await;
+
+                                    locked_fts.delete(&file_path);
+
                                     for parse_content in parsed.content {
-                                        fts.lock().await.push(ParseContentWithPath { message: parse_content.into(), file_path: file_path.clone() });
+                                        locked_fts.push(ParseContentWithPath { message: parse_content.into(), file_path: file_path.clone() });
                                     }
                                 },
                                 Err(err) => {
@@ -118,7 +123,7 @@ impl Registry {
                             },
                             RegistryMessage::Remove(file_path) => {
                                 info!(file_path = &file_path, "received remove message");
-                                match fts.lock().await.delete(file_path.clone()) {
+                                match fts.lock().await.delete(&file_path) {
                                     Some(_) => info!(id = file_path, "deleted from fts"),
                                     None => info!(id=file_path, "could not delete from fts"),
                                 }
