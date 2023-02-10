@@ -1,4 +1,5 @@
 pub mod cli;
+pub mod discoverer;
 pub mod fts;
 pub mod model;
 pub mod parse;

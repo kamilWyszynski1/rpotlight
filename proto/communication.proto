@@ -71,3 +71,17 @@ message CliResponse {
 service Cli {
     rpc Command(CliRequest) returns (CliResponse);
 }
+
+// ===== DISCOVERER =====
+message DiscoverRequest {
+    ParserType p_type = 1;
+}
+
+message DiscoverResponse {
+    repeated string urls = 1;
+}
+
+service Discoverer {
+    rpc Register(RegisterRequest) returns (RegisterResponse);
+    rpc Discover(DiscoverRequest) returns (DiscoverResponse);
+}
