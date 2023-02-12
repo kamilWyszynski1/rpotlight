@@ -12,7 +12,6 @@ use std::io;
 use std::path::Path;
 use std::{collections::HashMap, path, sync::Arc};
 use tokio::sync::{mpsc, Mutex};
-use tonic::{Response, Status};
 use tracing::debug;
 use tracing::warn;
 use tracing::{error, info};
@@ -26,6 +25,9 @@ type Parsers = Arc<
         >,
     >,
 >;
+
+type DiscovererClient =
+    communication::discoverer_client::DiscovererClient<tonic::transport::Channel>;
 
 /// Type wrap for database.
 pub type DB = Arc<Mutex<sled::Db>>;
@@ -59,6 +61,7 @@ pub struct Registry {
     cli_tx: Option<twoway::Receiver<communication::CliRequest, communication::CliResponse>>,
 
     /// RPC clients for parsers.
+    //TODO: allow to register multiple parser of the same type, loadbalancing?
     parsers: Parsers,
 
     /// Structure is responsible for all operation related to storing indexes and searches.
@@ -164,31 +167,41 @@ impl Registry {
         });
         Ok(())
     }
-}
 
-#[tonic::async_trait]
-impl communication::register_server::Register for Registry {
-    async fn register(
-        &self,
-        request: tonic::Request<communication::RegisterRequest>,
-    ) -> Result<Response<communication::RegisterResponse>, Status> {
-        let data = request.into_inner();
+    /// Periodically calls discoverer service for current state of working parsers.
+    pub async fn fetch_parsers(&self, mut discoverer_client: DiscovererClient) {
+        let parsers = self.parsers.clone();
 
-        info!("trying to connect to parser server, {:?}", data);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::new(3, 0)).await;
 
-        let client = communication::parser_client::ParserClient::connect(format!(
-            "http://[::1]:{}",
-            data.port
-        ))
-        .await
-        .map_err(|e| {
-            error!("error while creating client, {}", e);
-            Status::internal("could not create client")
-        })?;
-
-        self.parsers.lock().await.insert(data.p_type(), client);
-
-        Ok(Response::new(communication::RegisterResponse::default()))
+                for p_type in [
+                    communication::ParserType::Rust,
+                    communication::ParserType::Golang,
+                ] {
+                    match discoverer_client
+                        .discover(communication::DiscoverRequest {
+                            p_type: p_type.into(),
+                        })
+                        .await
+                    {
+                        Ok(dresp) => {
+                            for url in dresp.into_inner().urls {
+                                if let Ok(client) =
+                                    communication::parser_client::ParserClient::connect(url).await
+                                {
+                                    parsers.lock().await.insert(p_type, client);
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            error!(err = err.to_string(), "could not call discoverer service")
+                        }
+                    }
+                }
+            }
+        });
     }
 }
 

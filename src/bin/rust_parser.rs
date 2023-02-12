@@ -1,6 +1,7 @@
 use rpot::{
     communication::{self},
     parse::ParserVariant,
+    GRPCResult,
 };
 use tonic::{async_trait, transport::Server, Response, Status};
 use tracing::{error, info};
@@ -14,7 +15,7 @@ impl communication::parser_server::Parser for RustParser {
     async fn parse(
         &self,
         request: tonic::Request<communication::ParseRequest>,
-    ) -> Result<Response<communication::ParseResponse>, Status> {
+    ) -> GRPCResult<communication::ParseResponse> {
         let file_path = request.into_inner().file_path;
 
         info!(path = file_path, "received rust file to parse");
@@ -27,6 +28,13 @@ impl communication::parser_server::Parser for RustParser {
 
         Ok(Response::new(parsed?))
     }
+
+    async fn health_check(
+        &self,
+        _: tonic::Request<communication::HealthCheckRequest>,
+    ) -> GRPCResult<communication::HealthCheckResponse> {
+        Ok(Response::new(communication::HealthCheckResponse {}))
+    }
 }
 
 #[tokio::main]
@@ -35,7 +43,7 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
     let mut register =
-        communication::register_client::RegisterClient::connect("http://[::1]:50051").await?;
+        communication::discoverer_client::DiscovererClient::connect("http://[::1]:50059").await?;
 
     let addr = "[::1]:50052".parse()?;
 

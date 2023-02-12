@@ -1,6 +1,10 @@
 syntax = "proto3";
 package communication;
 
+message HealthCheckRequest {}
+message HealthCheckResponse {}
+
+
 // ===== PARSERS =====
 message ParseRequest {
     string file_path = 1;
@@ -32,6 +36,7 @@ message ParseResponse {
 
 service Parser {
     rpc Parse(ParseRequest) returns (ParseResponse);
+    rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
 }
 
 enum ParserType {
@@ -40,19 +45,7 @@ enum ParserType {
 }
 
 // ===== REGISTRY =====
-message RegisterRequest {
-    string host = 1;
-    string port = 2;
-    ParserType p_type = 3;
-}
 
-message RegisterResponse {
-    string response = 1;
-}
-
-service Register {
-    rpc Register(RegisterRequest) returns (RegisterResponse);
-}
 
 enum CliType {
     SEARCH = 0; 
@@ -73,6 +66,16 @@ service Cli {
 }
 
 // ===== DISCOVERER =====
+message RegisterRequest {
+    string host = 1;
+    string port = 2;
+    ParserType p_type = 3;
+}
+
+message RegisterResponse {
+    string response = 1;
+}
+
 message DiscoverRequest {
     ParserType p_type = 1;
 }

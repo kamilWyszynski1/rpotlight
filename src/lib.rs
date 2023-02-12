@@ -11,3 +11,5 @@ pub mod watcher;
 pub mod communication {
     tonic::include_proto!("communication");
 }
+
+pub type GRPCResult<T> = Result<tonic::Response<T>, tonic::Status>;

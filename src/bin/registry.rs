@@ -20,7 +20,6 @@ async fn main() -> anyhow::Result<()> {
 
     let db = create_or_load_db("db")?;
 
-    let addr = "[::1]:50051".parse()?;
     let cli_addr = "[::1]:50053".parse()?;
 
     let (tx, rx) = mpsc::channel(64);
@@ -53,13 +52,6 @@ async fn main() -> anyhow::Result<()> {
     });
 
     registry.start_receiving().await?;
-
-    Server::builder()
-        .add_service(communication::register_server::RegisterServer::new(
-            registry,
-        ))
-        .serve(addr)
-        .await?;
 
     Ok(())
 }
