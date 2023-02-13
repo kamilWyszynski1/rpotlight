@@ -5,6 +5,7 @@ use crate::model::ParseContentWithPath;
 use crate::read;
 use crate::twoway;
 use crate::watcher;
+use crate::DB;
 use anyhow::{bail, Context};
 use prost::Message;
 use sled::Tree;
@@ -28,9 +29,6 @@ type Parsers = Arc<
 
 type DiscovererClient =
     communication::discoverer_client::DiscovererClient<tonic::transport::Channel>;
-
-/// Type wrap for database.
-pub type DB = Arc<Mutex<sled::Db>>;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum RegistryMessage {
@@ -224,6 +222,7 @@ async fn load_fts_from_db(db: &DB) -> anyhow::Result<fts::FTS<ParseContentWithPa
     // load database content at start
     let mut fts = fts::FTS::default();
     let parsed_tree = db.clone().lock().await.open_tree("parsed")?;
+
     for msg in parsed_tree.into_iter() {
         let msg = msg?;
         let (_, value) = msg;

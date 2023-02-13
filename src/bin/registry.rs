@@ -1,8 +1,8 @@
 use rpot::cli;
 use rpot::communication;
-use rpot::communication::discoverer_client;
 use rpot::registry;
 use rpot::twoway;
+use rpot::DB;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::signal;
@@ -10,7 +10,7 @@ use tokio::sync::{mpsc, Mutex};
 use tonic::transport::Server;
 use tracing::error;
 
-fn create_or_load_db<P: AsRef<Path>>(p: P) -> anyhow::Result<registry::DB> {
+fn create_or_load_db<P: AsRef<Path>>(p: P) -> anyhow::Result<DB> {
     let tree = sled::open(p)?;
     Ok(Arc::new(Mutex::new(tree)))
 }

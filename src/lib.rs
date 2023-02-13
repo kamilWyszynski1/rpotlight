@@ -12,4 +12,11 @@ pub mod communication {
     tonic::include_proto!("communication");
 }
 
+/// Common types
+use std::sync::Arc;
+use tokio::sync::Mutex;
+
 pub type GRPCResult<T> = Result<tonic::Response<T>, tonic::Status>;
+
+/// Type wrap for database.
+pub type DB = Arc<Mutex<sled::Db>>;
