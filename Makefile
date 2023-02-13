@@ -22,3 +22,6 @@ registry:
 rust-parser:
 	cargo run --bin rust_parser
 
+discoverer:
+	cargo run --bin discoverer
+

@@ -61,7 +61,7 @@ async fn main() -> anyhow::Result<()> {
 
     register
         .register(communication::RegisterRequest {
-            host: "localhost".to_string(),
+            host: "[::1]".to_string(),
             port: "50052".to_string(),
             p_type: communication::ParserType::Rust.into(),
         })

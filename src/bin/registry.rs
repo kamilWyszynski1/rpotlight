@@ -1,9 +1,11 @@
 use rpot::cli;
 use rpot::communication;
+use rpot::communication::discoverer_client;
 use rpot::registry;
 use rpot::twoway;
 use std::path::Path;
 use std::sync::Arc;
+use tokio::signal;
 use tokio::sync::{mpsc, Mutex};
 use tonic::transport::Server;
 use tracing::error;
@@ -51,7 +53,15 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    let discoverer_client =
+        communication::discoverer_client::DiscovererClient::connect("http://[::1]:50059").await?;
+
+    registry.fetch_parsers(discoverer_client).await;
     registry.start_receiving().await?;
+
+    tokio::select! {
+        _ = signal::ctrl_c() => {},
+    }
 
     Ok(())
 }

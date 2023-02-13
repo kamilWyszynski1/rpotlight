@@ -121,11 +121,12 @@ impl Registry {
                                     }
                                 },
                                 Err(err) => {
-                                    error!("could not parse file: {}", err)
+                                    error!(file_path = file_path, new = new, "could not parse file: {}", err)
                                 },
                             },
                             RegistryMessage::Remove(file_path) => {
                                 info!(file_path = &file_path, "received remove message");
+
                                 match fts.lock().await.delete(&file_path) {
                                     Some(_) => info!(id = file_path, "deleted from fts"),
                                     None => info!(id=file_path, "could not delete from fts"),
@@ -174,8 +175,6 @@ impl Registry {
 
         tokio::spawn(async move {
             loop {
-                tokio::time::sleep(std::time::Duration::new(3, 0)).await;
-
                 for p_type in [
                     communication::ParserType::Rust,
                     communication::ParserType::Golang,
@@ -188,18 +187,33 @@ impl Registry {
                     {
                         Ok(dresp) => {
                             for url in dresp.into_inner().urls {
-                                if let Ok(client) =
-                                    communication::parser_client::ParserClient::connect(url).await
+                                match communication::parser_client::ParserClient::connect(url).await
                                 {
-                                    parsers.lock().await.insert(p_type, client);
+                                    Ok(client) => {
+                                        debug!(p_type = p_type.as_str_name(), "saving client");
+                                        parsers.lock().await.insert(p_type, client);
+                                    }
+                                    Err(err) => error!(
+                                        p_type = p_type.as_str_name(),
+                                        err = err.to_string(),
+                                        "could not create client"
+                                    ),
                                 }
                             }
                         }
                         Err(err) => {
-                            error!(err = err.to_string(), "could not call discoverer service")
+                            if err.code() == tonic::Code::NotFound {
+                                debug!(
+                                    p_type = p_type.as_str_name(),
+                                    "could not find registered parsers"
+                                );
+                            } else {
+                                error!(err = err.to_string(), "could not call discoverer service")
+                            }
                         }
                     }
                 }
+                tokio::time::sleep(std::time::Duration::new(3, 0)).await;
             }
         });
     }

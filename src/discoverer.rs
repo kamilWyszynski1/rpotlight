@@ -65,6 +65,8 @@ impl communication::discoverer_server::Discoverer for LocalDiscoverer {
                 error!("error while parsing p_type: {}", e);
                 Status::internal("could not register client")
             })?;
+        let url = format!("http://{}:{}", data.host, data.port);
+        info!(url = url, "trying to create parser client");
         self.state
             .lock()
             .await
@@ -73,15 +75,12 @@ impl communication::discoverer_server::Discoverer for LocalDiscoverer {
             .push(Parser(
                 data.host.clone(),
                 data.port.clone(),
-                communication::parser_client::ParserClient::connect(format!(
-                    "http://{}:{}",
-                    data.host, data.port
-                ))
-                .await
-                .map_err(|e| {
-                    error!("error while creating client, {}", e);
-                    Status::internal("could not create client")
-                })?,
+                communication::parser_client::ParserClient::connect(url)
+                    .await
+                    .map_err(|e| {
+                        error!("error while creating client, {}", e);
+                        Status::internal("could not create client")
+                    })?,
             ));
 
         Ok(Response::new(communication::RegisterResponse::default()))
@@ -103,7 +102,10 @@ impl communication::discoverer_server::Discoverer for LocalDiscoverer {
         match self.state.lock().await.get(&parsed_p_type) {
             Some(parsers) => {
                 return Ok(Response::new(communication::DiscoverResponse {
-                    urls: parsers.iter().map(|p| format!("{}:{}", p.0, p.1)).collect(),
+                    urls: parsers
+                        .iter()
+                        .map(|p| format!("http://{}:{}", p.0, p.1))
+                        .collect(),
                 }));
             }
             None => return Err(Status::not_found("no wanted parser registered")),
