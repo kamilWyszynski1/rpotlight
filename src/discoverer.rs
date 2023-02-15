@@ -1,9 +1,9 @@
-use crate::{communication, GRPCResult, DB};
-use anyhow::{bail, Context};
+use crate::{communication, GRPCResult};
+use anyhow::Context;
 use std::{collections::HashMap, sync::Arc};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, MutexGuard};
 use tonic::{transport, Response, Status};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 pub struct Parser(
     String,
@@ -11,30 +11,33 @@ pub struct Parser(
     communication::parser_client::ParserClient<transport::Channel>,
 );
 
-const DISCOVERER_TREE: &str = "discoverer";
+pub const DISCOVERER_TREE: &str = "discoverer";
 
 pub type State = Arc<Mutex<HashMap<communication::ParserType, Vec<Parser>>>>;
+pub type Tree = Arc<Mutex<sled::Tree>>;
 
 pub struct LocalDiscoverer {
     state: State,
 
     /// Persists current state of parsers.
-    db: DB,
+    db: Tree,
 }
 
 impl LocalDiscoverer {
-    pub fn new(state: Option<State>, db: DB) -> Self {
+    pub fn new(state: Option<State>, db: Tree) -> Self {
         Self {
             state: state.unwrap_or_default(),
             db,
         }
     }
 
-    pub async fn new_from_db(db: DB) -> anyhow::Result<Self> {
-        let dt = db.lock().await.open_tree(DISCOVERER_TREE)?;
-        let mut state: HashMap<communication::ParserType, Vec<Parser>> = HashMap::default();
+    pub async fn new_from_db(db: Tree) -> anyhow::Result<Self> {
+        let state: State = Arc::default();
 
-        for msg in dt.into_iter() {
+        let db_clone = db.clone();
+        let locked = db_clone.lock().await;
+
+        for msg in locked.into_iter() {
             let msg = msg?;
 
             let (host_port, p_type) = msg;
@@ -47,27 +50,42 @@ impl LocalDiscoverer {
             let host = host_port_spit.0.to_string();
             let port = host_port_spit.1.to_string();
 
-            let url = format!("http://{}:{}", host, port);
-            let client = communication::parser_client::ParserClient::connect(url)
-                .await
-                .map_err(|e| {
-                    error!("error while creating client, {}", e);
-                    Status::internal("could not create client")
-                })?;
-
-            state.entry(pt).or_default().push(Parser(
-                host_port_spit.0.to_string(),
-                host_port_spit.1.to_string(),
-                client,
-            ));
+            info!(
+                host = &host,
+                port = &port,
+                p_type = pt.as_str_name(),
+                "adding from database"
+            );
+            if let Err(err) =
+                add_parser(host.clone(), port.clone(), pt, &locked, state.clone()).await
+            {
+                if err.downcast_ref::<tonic::transport::Error>().is_some() {
+                    warn!(
+                        host = &host,
+                        port = &port,
+                        p_type = pt.as_str_name(),
+                        "parser is no longer available, skipping"
+                    );
+                } else {
+                    error!(
+                        err = err.to_string(),
+                        host = &host,
+                        port = &port,
+                        p_type = pt.as_str_name(),
+                        "could not add parser from db "
+                    )
+                }
+            }
         }
-        bail!("ll")
+        Ok(Self { db, state })
     }
 
     /// Functions spawn tokio task that takes care of updating LocalDiscoverer state by
     /// periodically call registered Parsers, if some one them won't respond, it's deleted from the state.
     pub async fn keep_parsers_in_sync(&self) {
         let state = self.state.clone();
+        let db = self.db.clone();
+
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::new(0, 500)).await;
@@ -81,13 +99,20 @@ impl LocalDiscoverer {
                             .await
                             .is_err()
                         {
-                            info!(
-                                host = parsers[idx].0,
-                                port = parsers[idx].1,
-                                "deleted from the state"
-                            );
+                            let (host, port) = (parsers[idx].0.clone(), parsers[idx].1.clone());
+
                             // has to be deleted
                             parsers.remove(idx);
+                            match db.lock().await.remove(format!("{}:{}", &host, &port)) {
+                                Ok(_) => info!(host = &host, port = &port, "parser removed"),
+                                Err(err) => error!(
+                                    err = err.to_string(),
+                                    host = &host,
+                                    port = &port,
+                                    "could not delete from db"
+                                ),
+                            }
+
                             continue;
                         }
                         idx += 1
@@ -96,6 +121,26 @@ impl LocalDiscoverer {
             }
         });
     }
+}
+
+async fn add_parser<'a>(
+    host: String,
+    port: String,
+    p_type: communication::ParserType,
+    tree: &'a MutexGuard<'a, sled::Tree>,
+    state: State,
+) -> anyhow::Result<()> {
+    state.lock().await.entry(p_type).or_default().push(Parser(
+        host.clone(),
+        port.clone(),
+        communication::parser_client::ParserClient::connect(format!("http://{}:{}", host, port))
+            .await?,
+    ));
+
+    tree.insert(format!("{}:{}", host, port), p_type.as_str_name())
+        .context("could not insert to db")?;
+
+    Ok(())
 }
 
 #[tonic::async_trait]
@@ -112,23 +157,26 @@ impl communication::discoverer_server::Discoverer for LocalDiscoverer {
                 error!("error while parsing p_type: {}", e);
                 Status::internal("could not register client")
             })?;
-        let url = format!("http://{}:{}", data.host, data.port);
-        info!(url = url, "trying to create parser client");
-        self.state
-            .lock()
-            .await
-            .entry(parsed_p_type)
-            .or_default()
-            .push(Parser(
-                data.host.clone(),
-                data.port.clone(),
-                communication::parser_client::ParserClient::connect(url)
-                    .await
-                    .map_err(|e| {
-                        error!("error while creating client, {}", e);
-                        Status::internal("could not create client")
-                    })?,
-            ));
+
+        add_parser(
+            data.host.clone(),
+            data.port.clone(),
+            parsed_p_type,
+            &self.db.clone().lock().await,
+            self.state.clone(),
+        )
+        .await
+        .map_err(|e| {
+            error!("error while creating client, {}", e);
+            Status::internal("could not create client")
+        })?;
+
+        info!(
+            host = &data.host,
+            port = &data.port,
+            p_type = parsed_p_type.as_str_name(),
+            "parser registered"
+        );
 
         Ok(Response::new(communication::RegisterResponse::default()))
     }

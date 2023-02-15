@@ -1,13 +1,13 @@
 use rpot::communication;
-use rpot::discoverer::LocalDiscoverer;
-use rpot::DB;
+use rpot::discoverer::{LocalDiscoverer, Tree, DISCOVERER_TREE};
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tonic::transport::Server;
+use tracing::info;
 
-fn create_or_load_db<P: AsRef<Path>>(p: P) -> anyhow::Result<DB> {
-    let tree = sled::open(p)?;
+fn create_or_load_db<P: AsRef<Path>>(p: P) -> anyhow::Result<Tree> {
+    let tree = sled::open(p)?.open_tree(DISCOVERER_TREE)?;
     Ok(Arc::new(Mutex::new(tree)))
 }
 
@@ -20,7 +20,7 @@ async fn main() -> anyhow::Result<()> {
 
     let addr = "[::1]:50059".parse()?;
 
-    let ld = LocalDiscoverer::new(None, db);
+    let ld = LocalDiscoverer::new_from_db(db).await?;
     ld.keep_parsers_in_sync().await;
 
     let server_thread = tokio::spawn(async move {
@@ -30,6 +30,8 @@ async fn main() -> anyhow::Result<()> {
             .await
             .unwrap();
     });
+
+    info!(addr = addr.to_string(), "server started");
 
     server_thread.await?;
     Ok(())
