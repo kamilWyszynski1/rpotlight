@@ -40,8 +40,8 @@ service Parser {
 }
 
 enum ParserType {
-    RUST = 0;
-    GOLANG = 1;
+    RS = 0;
+    GO = 1;
 }
 
 // ===== REGISTRY =====

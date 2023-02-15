@@ -16,7 +16,7 @@ async fn main() -> anyhow::Result<()> {
     // install global collector configured based on RUST_LOG env var.
     tracing_subscriber::fmt::init();
 
-    let db = create_or_load_db("db")?;
+    let db = create_or_load_db("db/discoverer")?;
 
     let addr = "[::1]:50059".parse()?;
 

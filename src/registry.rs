@@ -1,8 +1,10 @@
 use crate::communication;
 use crate::communication::ParseResponse;
+use crate::communication::ParserType;
 use crate::fts;
 use crate::model::ParseContentWithPath;
 use crate::read;
+use crate::read::IncludeOnly;
 use crate::twoway;
 use crate::watcher;
 use crate::DB;
@@ -18,7 +20,7 @@ use tracing::warn;
 use tracing::{error, info};
 
 /// Type wrap for storing parses grpc clients.
-type Parsers = Arc<
+pub type Parsers = Arc<
     Mutex<
         HashMap<
             communication::ParserType,
@@ -65,20 +67,21 @@ pub struct Registry {
     /// Structure is responsible for all operation related to storing indexes and searches.
     fts: Arc<Mutex<fts::FTS<ParseContentWithPath>>>,
 
-    /// Database will store information about prased files.
+    /// Database will store information about parsed files.
     db: DB,
 }
 
 impl Registry {
     pub async fn new(
         rx: mpsc::Receiver<RegistryMessage>,
+        parsers: Parsers,
         cli_tx: twoway::Receiver<communication::CliRequest, communication::CliResponse>,
         db: DB,
     ) -> anyhow::Result<Self> {
         let fts = load_fts_from_db(&db).await?;
         Ok(Self {
             rx: Some(rx),
-            parsers: Default::default(),
+            parsers,
             cli_tx: Some(cli_tx),
             fts: Arc::new(Mutex::new(fts)),
             db,
@@ -173,18 +176,15 @@ impl Registry {
 
         tokio::spawn(async move {
             loop {
-                for p_type in [
-                    communication::ParserType::Rust,
-                    communication::ParserType::Golang,
-                ] {
+                for p_type in [communication::ParserType::Rs, communication::ParserType::Go] {
                     match discoverer_client
                         .discover(communication::DiscoverRequest {
                             p_type: p_type.into(),
                         })
                         .await
                     {
-                        Ok(dresp) => {
-                            for url in dresp.into_inner().urls {
+                        Ok(response) => {
+                            for url in response.into_inner().urls {
                                 match communication::parser_client::ParserClient::connect(url).await
                                 {
                                     Ok(client) => {
@@ -289,8 +289,8 @@ async fn parse_file(
         .to_str()
         .unwrap()
     {
-        "go" => Some(communication::ParserType::Golang),
-        "rs" => Some(communication::ParserType::Rust),
+        "go" => Some(communication::ParserType::Go),
+        "rs" => Some(communication::ParserType::Rs),
         _ => None,
     };
 
@@ -339,18 +339,32 @@ impl FileInfoProvider {
         Ok(self.db.lock().await.open_tree("send")?)
     }
 
-    pub async fn read_and_send_files<P: AsRef<Path>>(&self, path: P) -> anyhow::Result<()> {
+    pub async fn read_and_send_files<P: AsRef<Path>>(
+        &self,
+        parsers: Parsers,
+        path: P,
+    ) -> anyhow::Result<()> {
         let path = path.as_ref();
 
         loop {
             tokio::time::sleep(std::time::Duration::new(10, 0)).await;
             let mut files = vec![];
 
-            info!("reading directory");
+            let available_parsers: Vec<IncludeOnly> = parsers
+                .lock()
+                .await
+                .keys()
+                .map(|pt| pt.as_str_name().to_lowercase())
+                .map(|ext| format!(".{}", ext))
+                .map(IncludeOnly::Suffix)
+                .collect();
+            if available_parsers.is_empty() {
+                warn!("there's no registered parsers, skip reading files");
+            }
 
             read::visit_dirs(
                 path,
-                vec![read::IncludeOnly::Suffix(".rs".to_string())],
+                available_parsers,
                 vec![read::Exclude::Contains("target/debug".to_string())],
                 |entry| files.push(entry.path().to_str().unwrap().to_string()),
             )?;

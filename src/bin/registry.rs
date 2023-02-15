@@ -1,6 +1,7 @@
 use rpot::cli;
 use rpot::communication;
 use rpot::registry;
+use rpot::registry::Parsers;
 use rpot::twoway;
 use rpot::DB;
 use std::path::Path;
@@ -20,20 +21,22 @@ async fn main() -> anyhow::Result<()> {
     // install global collector configured based on RUST_LOG env var.
     tracing_subscriber::fmt::init();
 
-    let db = create_or_load_db("db")?;
+    let db = create_or_load_db("db/registry")?;
 
     let cli_addr = "[::1]:50053".parse()?;
 
     let (tx, rx) = mpsc::channel(64);
     let (cli_tx, cli_rx) = twoway::channel(100);
-    let mut registry = registry::Registry::new(rx, cli_rx, db.clone()).await?;
+
+    let parsers: Parsers = Arc::default();
+    let mut registry = registry::Registry::new(rx, parsers.clone(), cli_rx, db.clone()).await?;
 
     let file_provider = registry::FileInfoProvider::new(db.clone(), tx).await?;
 
     // spawn task that will read files
     tokio::spawn(async move {
         if let Err(err) = file_provider
-            .read_and_send_files("/home/kamil/programming/rust/rpotlight")
+            .read_and_send_files(parsers.clone(), "/home/kamil/programming/rust/rpotlight")
             .await
         {
             error!(err = err.to_string(), "read_and-send_files failed");
