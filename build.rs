@@ -6,6 +6,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "ParserType",
             "#[derive(serde::Deserialize, serde::Serialize)]",
         )
+        .type_attribute(
+            "ParseResponse",
+            "#[derive(serde::Deserialize, serde::Serialize)]",
+        )
+        .type_attribute(
+            "ParseContent",
+            "#[derive(serde::Deserialize, serde::Serialize)]",
+        )
+        .type_attribute(
+            "ParsedType",
+            "#[derive(serde::Deserialize, serde::Serialize)]",
+        )
         .compile(&["proto/communication.proto"], &["proto"])?;
     Ok(())
 }

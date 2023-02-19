@@ -6,10 +6,10 @@ use crate::read;
 use crate::read::IncludeOnly;
 use crate::twoway;
 use crate::watcher;
-use crate::DB;
 use anyhow::{bail, Context};
-use prost::Message;
-use sled::Tree;
+use bson::doc;
+use futures::TryStreamExt;
+use mongodb::Collection;
 use std::io;
 use std::path::Path;
 use std::{collections::HashMap, path, sync::Arc};
@@ -67,7 +67,7 @@ pub struct Registry {
     fts: Arc<Mutex<fts::FTS<ParseContentWithPath>>>,
 
     /// Database will store information about parsed files.
-    db: DB,
+    db: Collection<ParseResponse>,
 }
 
 impl Registry {
@@ -75,7 +75,7 @@ impl Registry {
         rx: mpsc::Receiver<RegistryMessage>,
         parsers: Parsers,
         cli_tx: twoway::Receiver<communication::CliRequest, communication::CliResponse>,
-        db: DB,
+        db: Collection<ParseResponse>,
     ) -> anyhow::Result<Self> {
         let fts = load_fts_from_db(&db).await?;
         Ok(Self {
@@ -88,29 +88,28 @@ impl Registry {
     }
 
     pub async fn start_receiving(&mut self) -> anyhow::Result<()> {
-        let mut tx = self.rx.take().context("tx is not set")?;
+        let mut rx = self.rx.take().context("tx is not set")?;
         let parsers = self.parsers.clone();
         let fts = self.fts.clone();
         let mut cli_tx = self.cli_tx.take().context("cli_tx is not set")?;
-        let parsed_tree = self.db.clone().lock().await.open_tree("parsed")?;
+        let db = self.db.clone();
 
         tokio::spawn(async move {
             loop {
                 tokio::select! {
                     // parsers things
-                    message = tx.recv() => match message {
+                    message = rx.recv() => match message {
                         Some(message) => match message {
                             RegistryMessage::Parse { file_path, new } => match parse_file(file_path.clone(), parsers.clone()).await {
                                 Ok(parsed) => {
                                     info!(file_path = &file_path, new = new, "received parse message");
 
-                                    // convert parsed, proto message into bytes
-                                    let mut buf = vec![];
-                                    parsed.encode(&mut buf).unwrap();
-                                    // write those bytes
-                                    parsed_tree.insert(file_path.clone(), buf).unwrap();
+                                    // write to the db
+                                    if let Err(err) = db.insert_one(parsed.clone(), None).await {
+                                        error!(err= err.to_string(),file_path = file_path, new = new, "could not save parsed file to db");
+                                    }
 
-                                    // clear fts before writting (possibilly) data of already stored and modified file
+                                    // clear fts before writing (possibility) data of already stored and modified file
                                     let file_path = parsed.file_path.clone();
                                     let mut locked_fts =  fts.lock().await;
 
@@ -131,7 +130,7 @@ impl Registry {
                                     Some(_) => info!(id = file_path, "deleted from fts"),
                                     None => info!(id=file_path, "could not delete from fts"),
                                 }
-                                if let Err(err) = parsed_tree.remove(&file_path) {
+                                if let Err(err) = db.delete_one(doc!{ "file_path": file_path}, None).await {
                                     error!(method = "start_receiving", err = err.to_string(), "could not delete from db on RegistryMessage:Remove")
                                 }
                             },
@@ -217,17 +216,15 @@ impl Registry {
 }
 
 /// Reads all parsed data from database and creates new FTS from that data.
-async fn load_fts_from_db(db: &DB) -> anyhow::Result<fts::FTS<ParseContentWithPath>> {
+async fn load_fts_from_db(
+    db: &Collection<ParseResponse>,
+) -> anyhow::Result<fts::FTS<ParseContentWithPath>> {
     // load database content at start
     let mut fts = fts::FTS::default();
-    let parsed_tree = db.clone().lock().await.open_tree("parsed")?;
 
-    for msg in parsed_tree.into_iter() {
-        let msg = msg?;
-        let (_, value) = msg;
-
-        let value = ParseResponse::decode(value.to_vec().as_slice())?;
-
+    let mut found = db.find(None, None).await?;
+    while let Some(value) = found.try_next().await? {
+        // TODO: check file's checksum
         let file_path = value.file_path.clone();
         for parse_content in value.content {
             fts.push(ParseContentWithPath {
@@ -236,25 +233,22 @@ async fn load_fts_from_db(db: &DB) -> anyhow::Result<fts::FTS<ParseContentWithPa
             });
         }
     }
+
     Ok(fts)
 }
 
 /// Reads all parsed data from database and for each entry creates watcher.
 /// Watcher is needed in case of already parsed, stored files that will be deleted later on.
 async fn load_watcher_manager_from_db(
-    db: &DB,
+    db: &Collection<String>,
     tx: mpsc::Sender<RegistryMessage>,
 ) -> anyhow::Result<watcher::WatcherManager> {
     // load database content at start
     let manager = watcher::WatcherManager::default();
-    let parsed_tree = db.clone().lock().await.open_tree("parsed")?;
-    for msg in parsed_tree.into_iter() {
-        let msg = msg?;
-        let (_, value) = msg;
 
-        let value = ParseResponse::decode(value.to_vec().as_slice())?;
-        let file_path = value.file_path.clone();
+    let mut found = db.find(None, None).await?;
 
+    while let Some(file_path) = found.try_next().await? {
         if let Err(err) = manager
             .watcher_proxy(Path::new(&file_path), tx.clone())
             .await
@@ -275,6 +269,7 @@ async fn load_watcher_manager_from_db(
             )
         }
     }
+
     Ok(manager)
 }
 
@@ -308,7 +303,7 @@ async fn parse_file(
 }
 
 pub struct FileInfoProvider {
-    db: DB,
+    db: Collection<String>,
 
     /// Sender for notifing Registry about changes.
     tx: mpsc::Sender<RegistryMessage>,
@@ -318,7 +313,10 @@ pub struct FileInfoProvider {
 }
 
 impl FileInfoProvider {
-    pub async fn new(db: DB, tx: mpsc::Sender<RegistryMessage>) -> anyhow::Result<Self> {
+    pub async fn new(
+        db: Collection<String>,
+        tx: mpsc::Sender<RegistryMessage>,
+    ) -> anyhow::Result<Self> {
         let watcher_manager = load_watcher_manager_from_db(&db, tx.clone()).await?;
 
         Ok(Self {
@@ -334,15 +332,7 @@ impl FileInfoProvider {
             .await
     }
 
-    async fn send_tree(&self) -> anyhow::Result<Tree> {
-        Ok(self.db.lock().await.open_tree("send")?)
-    }
-
-    pub async fn read_and_send_files<P: AsRef<Path>>(
-        &self,
-        parsers: Parsers,
-        path: P,
-    ) -> anyhow::Result<()> {
+    pub async fn read_and_send_files<P: AsRef<Path>>(&self, parsers: Parsers, path: P) {
         let path = path.as_ref();
 
         loop {
@@ -361,21 +351,29 @@ impl FileInfoProvider {
                 warn!("there's no registered parsers, skip reading files");
             }
 
-            read::visit_dirs(
+            if let Err(err) = read::visit_dirs(
                 path,
                 available_parsers,
                 vec![read::Exclude::Contains("target/debug".to_string())],
                 |entry| files.push(entry.path().to_str().unwrap().to_string()),
-            )?;
+            ) {
+                error!(
+                    error = err.to_string(),
+                    method = "read_and_send_files",
+                    "could not visit dirs"
+                );
+                continue;
+            }
 
             info!("found {} files", files.len());
 
-            // separate tree for send information.
-            let send_tree = self.send_tree().await?;
-
             for file_path in files {
-                let was_sent = send_tree.get(file_path.clone())?;
-                if was_sent.is_some() {
+                let found = self
+                    .db
+                    .find_one(doc! { "file_path": &file_path}, None)
+                    .await?.and_then(f)
+
+                if found.is_some() {
                     debug!(file = file_path.clone(), "file was already sent to process");
                     continue;
                 }
@@ -388,8 +386,7 @@ impl FileInfoProvider {
                     .await
                 {
                     Ok(_) => {
-                        send_tree.insert(file_path.clone(), b"true")?;
-
+                        self.db.insert_one(&file_path, None).await?;
                         self.spawn_watcher(Path::new(&file_path)).await?;
                     }
                     Err(err) => {

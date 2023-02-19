@@ -1,27 +1,29 @@
 use rpot::cli;
 use rpot::communication;
+use rpot::db;
 use rpot::registry;
 use rpot::registry::Parsers;
 use rpot::twoway;
-use rpot::DB;
-use std::path::Path;
 use std::sync::Arc;
 use tokio::signal;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::mpsc;
 use tonic::transport::Server;
 use tracing::error;
-
-fn create_or_load_db<P: AsRef<Path>>(p: P) -> anyhow::Result<DB> {
-    let tree = sled::open(p)?;
-    Ok(Arc::new(Mutex::new(tree)))
-}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // install global collector configured based on RUST_LOG env var.
     tracing_subscriber::fmt::init();
 
-    let db = create_or_load_db("db/registry")?;
+    let config = db::Config {
+        app_name: Some("discoverer"),
+        database: "discoverer",
+        host: "localhost",
+        password: "rpotlight",
+        username: "rpotlight",
+        port: 27017,
+    };
+    let conn = db::conn(config).await?;
 
     let cli_addr = "[::1]:50053".parse()?;
 
@@ -29,9 +31,10 @@ async fn main() -> anyhow::Result<()> {
     let (cli_tx, cli_rx) = twoway::channel(100);
 
     let parsers: Parsers = Arc::default();
-    let mut registry = registry::Registry::new(rx, parsers.clone(), cli_rx, db.clone()).await?;
+    let mut registry =
+        registry::Registry::new(rx, parsers.clone(), cli_rx, conn.collection("content")).await?;
 
-    let file_provider = registry::FileInfoProvider::new(db.clone(), tx).await?;
+    let file_provider = registry::FileInfoProvider::new(conn.collection("parsed"), tx).await?;
 
     // spawn task that will read files
     tokio::spawn(async move {
