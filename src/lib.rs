@@ -1,4 +1,5 @@
 pub mod cli;
+pub mod db;
 pub mod discoverer;
 pub mod fts;
 pub mod model;

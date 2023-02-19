@@ -1,6 +1,5 @@
 use crate::communication;
 use crate::communication::ParseResponse;
-use crate::communication::ParserType;
 use crate::fts;
 use crate::model::ParseContentWithPath;
 use crate::read;

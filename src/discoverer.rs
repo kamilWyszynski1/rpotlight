@@ -1,82 +1,81 @@
-use crate::{communication, GRPCResult};
+use crate::{
+    communication::{self, parser_client::ParserClient},
+    GRPCResult,
+};
 use anyhow::Context;
-use std::{collections::HashMap, sync::Arc};
-use tokio::sync::{Mutex, MutexGuard};
-use tonic::{transport, Response, Status};
+use futures::TryStreamExt;
+use mongodb::{bson::doc, Collection};
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use tonic::{transport::Channel, Response, Status};
 use tracing::{error, info, warn};
 
-pub struct Parser(
-    String,
-    String,
-    communication::parser_client::ParserClient<transport::Channel>,
-);
+/// Represents registered parser.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParserModel {
+    _id: bson::uuid::Uuid,
+    host: String,
+    port: u32,
+    parser_type: communication::ParserType, // maps to 'communication::ParserType'.
+}
 
 pub const DISCOVERER_TREE: &str = "discoverer";
 
-pub type State = Arc<Mutex<HashMap<communication::ParserType, Vec<Parser>>>>;
-pub type Tree = Arc<Mutex<sled::Tree>>;
+pub type State = Arc<Mutex<Vec<(ParserModel, ParserClient<Channel>)>>>;
+pub type DB = Collection<ParserModel>;
 
 pub struct LocalDiscoverer {
     state: State,
 
     /// Persists current state of parsers.
-    db: Tree,
+    db: DB,
 }
 
 impl LocalDiscoverer {
-    pub fn new(state: Option<State>, db: Tree) -> Self {
+    pub fn new(state: Option<State>, db: DB) -> Self {
         Self {
             state: state.unwrap_or_default(),
             db,
         }
     }
 
-    pub async fn new_from_db(db: Tree) -> anyhow::Result<Self> {
+    pub async fn new_from_db(db: DB) -> anyhow::Result<Self> {
         let state: State = Arc::default();
 
-        let db_clone = db.clone();
-        let locked = db_clone.lock().await;
+        let mut found = db.find(None, None).await?; // find all
 
-        for msg in locked.into_iter() {
-            let msg = msg?;
-
-            let (host_port, p_type) = msg;
-
-            let hp = String::from_utf8(host_port.to_vec())?;
-            let pt = communication::ParserType::from_str_name(&String::from_utf8(p_type.to_vec())?)
-                .context("could not build ParserType from pt")?;
-
-            let host_port_spit = hp.split_once(':').context("could not split host_port")?;
-            let host = host_port_spit.0.to_string();
-            let port = host_port_spit.1.to_string();
-
+        while let Some(parser) = found.try_next().await? {
             info!(
-                host = &host,
-                port = &port,
-                p_type = pt.as_str_name(),
+                id = parser._id.to_string(),
+                host = &parser.host,
+                port = &parser.port,
+                parser_type = parser.parser_type.as_str_name(),
                 "adding from database"
             );
-            if let Err(err) =
-                add_parser(host.clone(), port.clone(), pt, &locked, state.clone()).await
-            {
+
+            if let Err(err) = add_parser(parser.clone(), state.clone(), None).await {
                 if err.downcast_ref::<tonic::transport::Error>().is_some() {
                     warn!(
-                        host = &host,
-                        port = &port,
-                        p_type = pt.as_str_name(),
+                        id = parser._id.to_string(),
+                        host = &parser.host,
+                        port = &parser.port,
+                        parser_type = parser.parser_type.as_str_name(),
                         "parser is no longer available, skipping"
                     );
                 } else {
                     error!(
                         err = err.to_string(),
-                        host = &host,
-                        port = &port,
-                        p_type = pt.as_str_name(),
+                        id = parser._id.to_string(),
+                        host = &parser.host,
+                        port = &parser.port,
+                        parser_type = parser.parser_type.as_str_name(),
                         "could not add parser from db "
                     )
                 }
             }
         }
+
         Ok(Self { db, state })
     }
 
@@ -89,56 +88,71 @@ impl LocalDiscoverer {
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::new(0, 500)).await;
-                for (_, parsers) in state.lock().await.iter_mut() {
-                    let mut idx = 0;
+                let mut idx = 0;
 
-                    while idx < parsers.len() {
-                        if parsers[idx]
-                            .2
-                            .health_check(communication::HealthCheckRequest {})
-                            .await
-                            .is_err()
-                        {
-                            let (host, port) = (parsers[idx].0.clone(), parsers[idx].1.clone());
+                let mut locked = state.lock().await;
+                while idx < locked.len() {
+                    let (model, mut client) = locked[idx].clone();
 
-                            // has to be deleted
-                            parsers.remove(idx);
-                            match db.lock().await.remove(format!("{}:{}", &host, &port)) {
-                                Ok(_) => info!(host = &host, port = &port, "parser removed"),
-                                Err(err) => error!(
-                                    err = err.to_string(),
-                                    host = &host,
-                                    port = &port,
-                                    "could not delete from db"
-                                ),
+                    if client
+                        .health_check(communication::HealthCheckRequest {})
+                        .await
+                        .is_err()
+                    {
+                        locked.remove(idx);
+                        match db.delete_one(doc! {"_id": model._id}, None).await {
+                            Ok(result) => {
+                                if result.deleted_count == 0 {
+                                    warn!(
+                                        id = model._id.to_string(),
+                                        host = &model.host,
+                                        port = &model.port,
+                                        parser_type = model.parser_type.as_str_name(),
+                                        "parser not found in db"
+                                    )
+                                } else {
+                                    info!(
+                                        id = model._id.to_string(),
+                                        host = &model.host,
+                                        port = &model.port,
+                                        parser_type = model.parser_type.as_str_name(),
+                                        "parser removed"
+                                    )
+                                }
                             }
-
-                            continue;
+                            Err(err) => error!(
+                                err = err.to_string(),
+                                id = model._id.to_string(),
+                                host = &model.host,
+                                port = &model.port,
+                                parser_type = model.parser_type.as_str_name(),
+                                "could not delete from db"
+                            ),
                         }
-                        idx += 1
+                        continue;
                     }
+                    idx += 1
                 }
             }
         });
     }
 }
 
-async fn add_parser<'a>(
-    host: String,
-    port: String,
-    p_type: communication::ParserType,
-    tree: &'a MutexGuard<'a, sled::Tree>,
-    state: State,
-) -> anyhow::Result<()> {
-    state.lock().await.entry(p_type).or_default().push(Parser(
-        host.clone(),
-        port.clone(),
-        communication::parser_client::ParserClient::connect(format!("http://{}:{}", host, port))
-            .await?,
-    ));
+/// Adds parsers to state and also to the db if provided.
+async fn add_parser(parser: ParserModel, state: State, db: Option<DB>) -> anyhow::Result<()> {
+    let client = communication::parser_client::ParserClient::connect(format!(
+        "http://{}:{}",
+        parser.host, parser.port
+    ))
+    .await?;
 
-    tree.insert(format!("{}:{}", host, port), p_type.as_str_name())
-        .context("could not insert to db")?;
+    if let Some(db) = db {
+        db.insert_one(&parser, None)
+            .await
+            .context("could not insert to the db")?;
+    }
+
+    state.lock().await.push((parser, client));
 
     Ok(())
 }
@@ -151,19 +165,27 @@ impl communication::discoverer_server::Discoverer for LocalDiscoverer {
     ) -> GRPCResult<communication::RegisterResponse> {
         let data = request.into_inner();
 
-        let parsed_p_type = communication::ParserType::from_i32(data.p_type)
-            .context("got invalid p_type i32 value")
+        let parsed_parser_type = communication::ParserType::from_i32(data.p_type)
+            .context("got invalid parser_type i32 value")
             .map_err(|e| {
-                error!("error while parsing p_type: {}", e);
+                error!("error while parsing parser_type: {}", e);
                 Status::internal("could not register client")
             })?;
 
+        let id = bson::uuid::Uuid::parse_str(&data.id).map_err(|e| {
+            error!("error while parsing id as uuid: {}", e);
+            Status::invalid_argument("id must be uuid")
+        })?;
+
         add_parser(
-            data.host.clone(),
-            data.port.clone(),
-            parsed_p_type,
-            &self.db.clone().lock().await,
+            ParserModel {
+                _id: id,
+                host: data.host.clone(),
+                port: data.port,
+                parser_type: parsed_parser_type,
+            },
             self.state.clone(),
+            Some(self.db.clone()),
         )
         .await
         .map_err(|e| {
@@ -174,7 +196,7 @@ impl communication::discoverer_server::Discoverer for LocalDiscoverer {
         info!(
             host = &data.host,
             port = &data.port,
-            p_type = parsed_p_type.as_str_name(),
+            parser_type = parsed_parser_type.as_str_name(),
             "parser registered"
         );
 
@@ -187,23 +209,22 @@ impl communication::discoverer_server::Discoverer for LocalDiscoverer {
     ) -> GRPCResult<communication::DiscoverResponse> {
         let data = request.into_inner();
 
-        let parsed_p_type = communication::ParserType::from_i32(data.p_type)
-            .context("got invalid p_type i32 value")
+        let parsed_parser_type = communication::ParserType::from_i32(data.p_type)
+            .context("got invalid parser_type i32 value")
             .map_err(|e| {
-                error!("error while parsing p_type: {}", e);
+                error!("error while parsing parser_type: {}", e);
                 Status::internal("could not register client")
             })?;
 
-        match self.state.lock().await.get(&parsed_p_type) {
-            Some(parsers) => {
-                return Ok(Response::new(communication::DiscoverResponse {
-                    urls: parsers
-                        .iter()
-                        .map(|p| format!("http://{}:{}", p.0, p.1))
-                        .collect(),
-                }));
-            }
-            None => return Err(Status::not_found("no wanted parser registered")),
-        }
+        let urls: Vec<String> = self
+            .state
+            .lock()
+            .await
+            .iter()
+            .filter(|(model, _)| model.parser_type == parsed_parser_type)
+            .map(|(model, _)| format!("http://{}:{}", model.host, model.port))
+            .collect();
+
+        Ok(Response::new(communication::DiscoverResponse { urls }))
     }
 }

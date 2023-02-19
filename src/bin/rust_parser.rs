@@ -42,6 +42,8 @@ async fn main() -> anyhow::Result<()> {
     // install global collector configured based on RUST_LOG env var.
     tracing_subscriber::fmt::init();
 
+    let id = bson::uuid::Uuid::new();
+
     let mut register =
         communication::discoverer_client::DiscovererClient::connect("http://[::1]:50059").await?;
 
@@ -61,8 +63,9 @@ async fn main() -> anyhow::Result<()> {
 
     register
         .register(communication::RegisterRequest {
+            id: id.to_string(),
             host: "[::1]".to_string(),
-            port: "50052".to_string(),
+            port: 50052,
             p_type: communication::ParserType::Rs.into(),
         })
         .await

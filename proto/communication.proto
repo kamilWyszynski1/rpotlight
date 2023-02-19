@@ -68,8 +68,9 @@ service Cli {
 // ===== DISCOVERER =====
 message RegisterRequest {
     string host = 1;
-    string port = 2;
+    uint32 port = 2;
     ParserType p_type = 3;
+    string id = 4;
 }
 
 message RegisterResponse {
