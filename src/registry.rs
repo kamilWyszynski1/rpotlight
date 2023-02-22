@@ -9,10 +9,13 @@ use crate::watcher;
 use anyhow::{bail, Context};
 use bson::doc;
 use futures::TryStreamExt;
+use md5::Digest;
 use mongodb::Collection;
 use serde::Deserialize;
 use serde::Serialize;
+use std::fs::File;
 use std::io;
+use std::io::BufReader;
 use std::path::Path;
 use std::{collections::HashMap, path, sync::Arc};
 use tokio::sync::{mpsc, Mutex};
@@ -391,7 +394,6 @@ impl FileInfoProvider {
                 .await
                 .context("could not find by file_path")?;
             if found.is_some() {
-                //TODO: I think this should not happen, already parsed files should be managed by watcher
                 debug!(file = file_path.clone(), "file was already sent to process");
                 continue;
             }
@@ -419,6 +421,45 @@ impl FileInfoProvider {
                 }
             }
         }
+        Ok(())
+    }
+}
+
+fn file_checksum<P: AsRef<Path>>(path: P) -> anyhow::Result<String> {
+    let f = File::open(path).unwrap();
+    // Find the length of the file
+    let len = f.metadata().unwrap().len();
+    // Decide on a reasonable buffer size (1MB in this case, fastest will depend on hardware)
+    let buf_len = len.min(1_000_000) as usize;
+    let mut buf = BufReader::with_capacity(buf_len, f);
+    let mut hasher = md5::Md5::default();
+
+    io::copy(&mut buf, &mut hasher)?;
+    let content = hasher.finalize();
+    Ok(format!("{:x}", content))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs::File, io::Write};
+
+    use tempdir::TempDir;
+
+    use super::file_checksum;
+
+    #[test]
+    fn test_file_checksum() -> anyhow::Result<()> {
+        let tmp_dir = TempDir::new("example")?;
+        let file_path = tmp_dir.path().join("test.txt");
+        let mut file = File::create(&file_path)?;
+        file.write_all("1qazxsw23edcvfr4".as_bytes())?;
+
+        assert_eq!(
+            // from https://www.md5.cz/
+            "08b6e76863ebb1395c10eaa5f161a83f".to_string(),
+            file_checksum(&file_path)?
+        );
+
         Ok(())
     }
 }

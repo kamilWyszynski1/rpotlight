@@ -1585,6 +1585,7 @@ dependencies = [
  "clap",
  "futures",
  "lazy_static",
+ "md-5",
  "mongodb",
  "notify",
  "prost",
