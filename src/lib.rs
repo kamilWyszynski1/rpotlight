@@ -2,6 +2,7 @@ pub mod cli;
 pub mod db;
 pub mod discoverer;
 pub mod fts;
+pub mod migrations;
 pub mod model;
 pub mod parse;
 pub mod read;

@@ -1,6 +1,8 @@
 use rpot::cli;
 use rpot::communication;
 use rpot::db;
+use rpot::migrations::content_migrations;
+use rpot::migrations::parsed_migrations;
 use rpot::registry;
 use rpot::registry::Parsers;
 use rpot::twoway;
@@ -16,14 +18,16 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
     let config = db::Config {
-        app_name: Some("discoverer"),
-        database: "discoverer",
+        app_name: Some("registry"),
+        database: "registry",
         host: "localhost",
         password: "rpotlight",
         username: "rpotlight",
         port: 27017,
     };
     let conn = db::conn(config).await?;
+    parsed_migrations(&conn).await;
+    content_migrations(&conn).await;
 
     let cli_addr = "[::1]:50053".parse()?;
 
@@ -38,12 +42,9 @@ async fn main() -> anyhow::Result<()> {
 
     // spawn task that will read files
     tokio::spawn(async move {
-        if let Err(err) = file_provider
+        file_provider
             .read_and_send_files(parsers.clone(), "/home/kamil/programming/rust/rpotlight")
-            .await
-        {
-            error!(err = err.to_string(), "read_and-send_files failed");
-        }
+            .await;
     });
 
     // spawn task that will receive cli rpc calls

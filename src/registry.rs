@@ -10,6 +10,8 @@ use anyhow::{bail, Context};
 use bson::doc;
 use futures::TryStreamExt;
 use mongodb::Collection;
+use serde::Deserialize;
+use serde::Serialize;
 use std::io;
 use std::path::Path;
 use std::{collections::HashMap, path, sync::Arc};
@@ -240,7 +242,7 @@ async fn load_fts_from_db(
 /// Reads all parsed data from database and for each entry creates watcher.
 /// Watcher is needed in case of already parsed, stored files that will be deleted later on.
 async fn load_watcher_manager_from_db(
-    db: &Collection<String>,
+    db: &Collection<ParsedModel>,
     tx: mpsc::Sender<RegistryMessage>,
 ) -> anyhow::Result<watcher::WatcherManager> {
     // load database content at start
@@ -248,16 +250,16 @@ async fn load_watcher_manager_from_db(
 
     let mut found = db.find(None, None).await?;
 
-    while let Some(file_path) = found.try_next().await? {
+    while let Some(model) = found.try_next().await? {
         if let Err(err) = manager
-            .watcher_proxy(Path::new(&file_path), tx.clone())
+            .watcher_proxy(Path::new(&model.file_path), tx.clone())
             .await
         {
             if let Some(nerr) = err.downcast_ref::<notify::Error>() {
                 if let notify::ErrorKind::Io(ref io) = nerr.kind {
                     if io::ErrorKind::NotFound == io.kind() {
                         // finally we are sure that file was removed
-                        tx.send(RegistryMessage::Remove(file_path.clone())).await?;
+                        tx.send(RegistryMessage::Remove(model.file_path)).await?;
                         continue;
                     }
                 }
@@ -302,8 +304,18 @@ async fn parse_file(
         .into_inner())
 }
 
+////////////////////////////////////////////////////
+//////          FileInfoProvider           /////////
+////////////////////////////////////////////////////
+
+/// Represents data in FileInfoProvider's database.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParsedModel {
+    file_path: String,
+}
+
 pub struct FileInfoProvider {
-    db: Collection<String>,
+    parsed_db: Collection<ParsedModel>,
 
     /// Sender for notifing Registry about changes.
     tx: mpsc::Sender<RegistryMessage>,
@@ -314,13 +326,13 @@ pub struct FileInfoProvider {
 
 impl FileInfoProvider {
     pub async fn new(
-        db: Collection<String>,
+        db: Collection<ParsedModel>,
         tx: mpsc::Sender<RegistryMessage>,
     ) -> anyhow::Result<Self> {
         let watcher_manager = load_watcher_manager_from_db(&db, tx.clone()).await?;
 
         Ok(Self {
-            db,
+            parsed_db: db,
             tx,
             watcher_manager,
         })
@@ -337,67 +349,76 @@ impl FileInfoProvider {
 
         loop {
             tokio::time::sleep(std::time::Duration::new(10, 0)).await;
-            let mut files = vec![];
-
-            let available_parsers: Vec<IncludeOnly> = parsers
-                .lock()
-                .await
-                .keys()
-                .map(|pt| pt.as_str_name().to_lowercase())
-                .map(|ext| format!(".{}", ext))
-                .map(IncludeOnly::Suffix)
-                .collect();
-            if available_parsers.is_empty() {
-                warn!("there's no registered parsers, skip reading files");
+            if let Err(err) = self.read_and_send(&parsers, path).await {
+                error!(err = err.to_string(), "could not read_and_send files")
             }
+        }
+    }
 
-            if let Err(err) = read::visit_dirs(
-                path,
-                available_parsers,
-                vec![read::Exclude::Contains("target/debug".to_string())],
-                |entry| files.push(entry.path().to_str().unwrap().to_string()),
-            ) {
-                error!(
-                    error = err.to_string(),
-                    method = "read_and_send_files",
-                    "could not visit dirs"
-                );
+    async fn read_and_send<P: AsRef<Path>>(
+        &self,
+        parsers: &Parsers,
+        path: P,
+    ) -> anyhow::Result<()> {
+        let mut files = vec![];
+
+        let available_parsers: Vec<IncludeOnly> = parsers
+            .lock()
+            .await
+            .keys()
+            .map(|pt| pt.as_str_name().to_lowercase())
+            .map(|ext| format!(".{}", ext))
+            .map(IncludeOnly::Suffix)
+            .collect();
+        if available_parsers.is_empty() {
+            warn!("there's no registered parsers, skip reading files");
+            return Ok(());
+        }
+
+        read::visit_dirs(
+            path,
+            available_parsers,
+            vec![read::Exclude::Contains("target/debug".to_string())],
+            |entry| files.push(entry.path().to_str().unwrap().to_string()),
+        )?;
+
+        info!("found {} files", files.len());
+
+        for file_path in files {
+            let found = self
+                .parsed_db
+                .find_one(doc! { "file_path": &file_path}, None)
+                .await
+                .context("could not find by file_path")?;
+            if found.is_some() {
+                //TODO: I think this should not happen, already parsed files should be managed by watcher
+                debug!(file = file_path.clone(), "file was already sent to process");
                 continue;
             }
 
-            info!("found {} files", files.len());
-
-            for file_path in files {
-                let found = self
-                    .db
-                    .find_one(doc! { "file_path": &file_path}, None)
-                    .await?.and_then(f)
-
-                if found.is_some() {
-                    debug!(file = file_path.clone(), "file was already sent to process");
-                    continue;
+            match self
+                .tx
+                .send(RegistryMessage::Parse {
+                    file_path: file_path.clone(),
+                    new: true,
+                })
+                .await
+            {
+                Ok(_) => {
+                    self.spawn_watcher(Path::new(&file_path)).await?;
+                    self.parsed_db
+                        .insert_one(ParsedModel { file_path }, None)
+                        .await?;
                 }
-                match self
-                    .tx
-                    .send(RegistryMessage::Parse {
-                        file_path: file_path.clone(),
-                        new: true,
-                    })
-                    .await
-                {
-                    Ok(_) => {
-                        self.db.insert_one(&file_path, None).await?;
-                        self.spawn_watcher(Path::new(&file_path)).await?;
-                    }
-                    Err(err) => {
-                        error!(
-                            error = err.to_string(),
-                            method = "read_and_send_files",
-                            "could not send message"
-                        );
-                    }
+                Err(err) => {
+                    error!(
+                        error = err.to_string(),
+                        method = "read_and_send_files",
+                        "could not send message"
+                    );
                 }
             }
         }
+        Ok(())
     }
 }
