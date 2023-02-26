@@ -32,6 +32,7 @@ message ParseContent {
 message ParseResponse {
     string file_path = 1;
     repeated ParseContent content = 2;
+    string checksum = 3;
 }
 
 service Parser {

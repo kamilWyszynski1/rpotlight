@@ -1,4 +1,5 @@
 use crate::communication::{ParseContent, ParseResponse, ParsedType};
+use crate::file_checksum;
 use crate::fts::{self, tokenize};
 use lazy_static::lazy_static;
 use regex::Regex;
@@ -47,6 +48,7 @@ fn syn_parse(file_path: String) -> anyhow::Result<ParseResponse> {
     let syntax = syn::parse_file(&src)?;
 
     let mut response = ParseResponse {
+        checksum: file_checksum(&file_path)?,
         file_path,
         content: vec![],
     };
@@ -97,6 +99,7 @@ fn regex_parse(file_path: String) -> anyhow::Result<ParseResponse> {
     let lines = read_lines(&file_path)?;
 
     let mut response = ParseResponse {
+        checksum: file_checksum(&file_path)?,
         file_path,
         ..Default::default()
     };

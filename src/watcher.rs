@@ -12,7 +12,7 @@ use tracing::{error, info};
 pub struct WatcherManager {
     /// Contains currently running watchers. If watcher receives remove message
     /// it will be deleted from state and its tokio task will end.
-    state: Arc<Mutex<HashMap<String, INotifyWatcher>>>,
+    pub state: Arc<Mutex<HashMap<String, INotifyWatcher>>>,
 }
 
 impl WatcherManager {

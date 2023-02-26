@@ -25,3 +25,5 @@ rust-parser:
 discoverer:
 	cargo run --bin discoverer
 
+clear-mongo:
+	mongosh eval < scripts/mongo-script.js

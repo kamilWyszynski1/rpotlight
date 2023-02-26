@@ -4,6 +4,7 @@ use rpot::db;
 use rpot::migrations::content_migrations;
 use rpot::migrations::parsed_migrations;
 use rpot::registry;
+use rpot::registry::load_from_db;
 use rpot::registry::Parsers;
 use rpot::twoway;
 use std::sync::Arc;
@@ -34,11 +35,15 @@ async fn main() -> anyhow::Result<()> {
     let (tx, rx) = mpsc::channel(64);
     let (cli_tx, cli_rx) = twoway::channel(100);
 
+    let (fts, manager) = load_from_db(&conn, tx.clone()).await?;
+
     let parsers: Parsers = Arc::default();
     let mut registry =
-        registry::Registry::new(rx, parsers.clone(), cli_rx, conn.collection("content")).await?;
+        registry::Registry::new(rx, parsers.clone(), cli_rx, conn.collection("content"), fts)
+            .await?;
 
-    let file_provider = registry::FileInfoProvider::new(conn.collection("parsed"), tx).await?;
+    let file_provider =
+        registry::FileInfoProvider::new(conn.collection("parsed"), tx, manager).await?;
 
     // spawn task that will read files
     tokio::spawn(async move {

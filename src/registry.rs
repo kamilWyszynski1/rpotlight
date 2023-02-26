@@ -1,5 +1,6 @@
 use crate::communication;
 use crate::communication::ParseResponse;
+use crate::file_checksum;
 use crate::fts;
 use crate::model::ParseContentWithPath;
 use crate::read;
@@ -8,14 +9,12 @@ use crate::twoway;
 use crate::watcher;
 use anyhow::{bail, Context};
 use bson::doc;
-use futures::TryStreamExt;
-use md5::Digest;
+use futures::StreamExt;
 use mongodb::Collection;
+use mongodb::Database;
 use serde::Deserialize;
 use serde::Serialize;
-use std::fs::File;
 use std::io;
-use std::io::BufReader;
 use std::path::Path;
 use std::{collections::HashMap, path, sync::Arc};
 use tokio::sync::{mpsc, Mutex};
@@ -81,8 +80,8 @@ impl Registry {
         parsers: Parsers,
         cli_tx: twoway::Receiver<communication::CliRequest, communication::CliResponse>,
         db: Collection<ParseResponse>,
+        fts: fts::FTS<ParseContentWithPath>,
     ) -> anyhow::Result<Self> {
-        let fts = load_fts_from_db(&db).await?;
         Ok(Self {
             rx: Some(rx),
             parsers,
@@ -220,62 +219,116 @@ impl Registry {
     }
 }
 
-/// Reads all parsed data from database and creates new FTS from that data.
-async fn load_fts_from_db(
-    db: &Collection<ParseResponse>,
-) -> anyhow::Result<fts::FTS<ParseContentWithPath>> {
-    // load database content at start
-    let mut fts = fts::FTS::default();
-
-    let mut found = db.find(None, None).await?;
-    while let Some(value) = found.try_next().await? {
-        // TODO: check file's checksum
-        let file_path = value.file_path.clone();
-        for parse_content in value.content {
-            fts.push(ParseContentWithPath {
-                message: parse_content.into(),
-                file_path: file_path.clone(),
-            });
-        }
+pub async fn load_from_db(
+    db: &Database,
+    tx: mpsc::Sender<RegistryMessage>,
+) -> anyhow::Result<(fts::FTS<ParseContentWithPath>, watcher::WatcherManager)> {
+    #[derive(Debug, Deserialize)]
+    struct Joined {
+        _id: bson::oid::ObjectId,
+        #[serde(flatten)]
+        content: ParsedModel,
     }
 
-    Ok(fts)
-}
+    #[derive(Debug, Deserialize)]
+    struct AggregationModel {
+        _id: bson::oid::ObjectId,
+        #[serde(flatten)]
+        content: ParseResponse,
 
-/// Reads all parsed data from database and for each entry creates watcher.
-/// Watcher is needed in case of already parsed, stored files that will be deleted later on.
-async fn load_watcher_manager_from_db(
-    db: &Collection<ParsedModel>,
-    tx: mpsc::Sender<RegistryMessage>,
-) -> anyhow::Result<watcher::WatcherManager> {
-    // load database content at start
+        joined: Option<Joined>,
+    }
+
+    let lookup = doc! {
+        "$lookup": {
+            "from": "parsed",
+            "localField": "file_path",
+            "foreignField": "file_path",
+            "as": "joined"
+        }
+    };
+
+    let unwind = doc! {
+        "$unwind": {
+            "path": "$joined",
+            "preserveNullAndEmptyArrays": true
+        }
+    };
+
+    let content_collection = db.collection::<ParseResponse>("content");
+    let parsed_collection = db.collection::<ParsedModel>("parsed");
+
+    let mut results = content_collection
+        .aggregate(vec![lookup, unwind], None)
+        .await?;
+
+    let mut fts = fts::FTS::default();
     let manager = watcher::WatcherManager::default();
 
-    let mut found = db.find(None, None).await?;
+    while let Some(result) = results.next().await {
+        let mut doc: AggregationModel = bson::from_document(result?)?;
 
-    while let Some(model) = found.try_next().await? {
+        if doc.joined.is_none() {
+            // remove content doc, easiest way of making it sync
+            // TODO: refactor
+            content_collection
+                .delete_one(doc! {"_id": doc._id}, None)
+                .await
+                .context("could not remove content's document")?;
+            continue;
+        }
+
+        let joined = doc.joined.take().unwrap();
+
+        if doc.content.checksum != joined.content.checksum
+            || doc.content.checksum != file_checksum(&doc.content.file_path)?
+        {
+            // remove content and parsed doc, easiest way of making it sync
+            // TODO: refactor
+            content_collection
+                .delete_one(doc! {"_id": doc._id}, None)
+                .await
+                .context("could not remove content's document")?;
+            parsed_collection
+                .delete_one(doc! {"_id": joined._id}, None)
+                .await
+                .context("could not remove parsed's document")?;
+        }
+
+        let file_path = doc.content.file_path.clone();
+
         if let Err(err) = manager
-            .watcher_proxy(Path::new(&model.file_path), tx.clone())
+            .watcher_proxy(Path::new(&file_path), tx.clone())
             .await
         {
             if let Some(nerr) = err.downcast_ref::<notify::Error>() {
                 if let notify::ErrorKind::Io(ref io) = nerr.kind {
                     if io::ErrorKind::NotFound == io.kind() {
                         // finally we are sure that file was removed
-                        tx.send(RegistryMessage::Remove(model.file_path)).await?;
+                        content_collection
+                            .delete_one(doc! {"_id": doc._id}, None)
+                            .await
+                            .context("could not remove content's document")?;
+                        parsed_collection
+                            .delete_one(doc! {"_id": joined._id}, None)
+                            .await
+                            .context("could not remove parsed's document")?;
                         continue;
                     }
                 }
             }
-            error!(
-                err = err.to_string(),
-                method = "load_watcher_manager_from_db",
-                "unknown error"
-            )
+            return Err(err);
+        }
+
+        // populate fts
+        for parse_content in doc.content.content {
+            fts.push(ParseContentWithPath {
+                message: parse_content.into(),
+                file_path: file_path.clone(),
+            });
         }
     }
-
-    Ok(manager)
+    Ok((fts, manager))
 }
 
 async fn parse_file(
@@ -315,6 +368,7 @@ async fn parse_file(
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParsedModel {
     file_path: String,
+    checksum: String,
 }
 
 pub struct FileInfoProvider {
@@ -331,9 +385,8 @@ impl FileInfoProvider {
     pub async fn new(
         db: Collection<ParsedModel>,
         tx: mpsc::Sender<RegistryMessage>,
+        watcher_manager: watcher::WatcherManager,
     ) -> anyhow::Result<Self> {
-        let watcher_manager = load_watcher_manager_from_db(&db, tx.clone()).await?;
-
         Ok(Self {
             parsed_db: db,
             tx,
@@ -370,7 +423,7 @@ impl FileInfoProvider {
             .await
             .keys()
             .map(|pt| pt.as_str_name().to_lowercase())
-            .map(|ext| format!(".{}", ext))
+            .map(|ext| format!(".{ext}"))
             .map(IncludeOnly::Suffix)
             .collect();
         if available_parsers.is_empty() {
@@ -385,17 +438,39 @@ impl FileInfoProvider {
             |entry| files.push(entry.path().to_str().unwrap().to_string()),
         )?;
 
-        info!("found {} files", files.len());
+        debug!("found {} files", files.len());
+        let watcher_state = self.watcher_manager.state.clone();
 
         for file_path in files {
+            if watcher_state.lock().await.contains_key(&file_path) {
+                debug!(
+                    file_path = &file_path,
+                    "file is already managed by watcher manager"
+                );
+                continue;
+            }
+
+            let checksum = file_checksum(&file_path)
+                .map_err(|err| {
+                    error!(
+                        err = err.to_string(),
+                        file_path = &file_path,
+                        "could not calculate file checksum"
+                    )
+                })
+                .unwrap_or_default();
+
             let found = self
                 .parsed_db
                 .find_one(doc! { "file_path": &file_path}, None)
                 .await
                 .context("could not find by file_path")?;
-            if found.is_some() {
-                debug!(file = file_path.clone(), "file was already sent to process");
-                continue;
+            if let Some(found) = found {
+                if checksum == found.checksum {
+                    // skip processing, file already processed
+                    debug!(file = file_path.clone(), "file was already sent to process");
+                    continue;
+                }
             }
 
             match self
@@ -409,7 +484,13 @@ impl FileInfoProvider {
                 Ok(_) => {
                     self.spawn_watcher(Path::new(&file_path)).await?;
                     self.parsed_db
-                        .insert_one(ParsedModel { file_path }, None)
+                        .insert_one(
+                            ParsedModel {
+                                file_path,
+                                checksum,
+                            },
+                            None,
+                        )
                         .await?;
                 }
                 Err(err) => {
@@ -421,45 +502,6 @@ impl FileInfoProvider {
                 }
             }
         }
-        Ok(())
-    }
-}
-
-fn file_checksum<P: AsRef<Path>>(path: P) -> anyhow::Result<String> {
-    let f = File::open(path).unwrap();
-    // Find the length of the file
-    let len = f.metadata().unwrap().len();
-    // Decide on a reasonable buffer size (1MB in this case, fastest will depend on hardware)
-    let buf_len = len.min(1_000_000) as usize;
-    let mut buf = BufReader::with_capacity(buf_len, f);
-    let mut hasher = md5::Md5::default();
-
-    io::copy(&mut buf, &mut hasher)?;
-    let content = hasher.finalize();
-    Ok(format!("{:x}", content))
-}
-
-#[cfg(test)]
-mod tests {
-    use std::{fs::File, io::Write};
-
-    use tempdir::TempDir;
-
-    use super::file_checksum;
-
-    #[test]
-    fn test_file_checksum() -> anyhow::Result<()> {
-        let tmp_dir = TempDir::new("example")?;
-        let file_path = tmp_dir.path().join("test.txt");
-        let mut file = File::create(&file_path)?;
-        file.write_all("1qazxsw23edcvfr4".as_bytes())?;
-
-        assert_eq!(
-            // from https://www.md5.cz/
-            "08b6e76863ebb1395c10eaa5f161a83f".to_string(),
-            file_checksum(&file_path)?
-        );
-
         Ok(())
     }
 }
